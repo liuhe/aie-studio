@@ -1,0 +1,12 @@
+node_modules
+dist
+.DS_Store
+*.log
+*.tsbuildinfo
+.env
+.claude_global
+.claude/settings.local.json
+docs/modeling/viewer/
+
+# aie 本地产物（/aie-test /aie-review 报告、观察数据），不入 git
+.aie/
