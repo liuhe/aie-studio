@@ -1,0 +1,7 @@
+packages:
+  - server
+  - web
+allowBuilds:
+  esbuild: true
+  sharp: true
+  core-js: true
