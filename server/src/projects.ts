@@ -1,4 +1,6 @@
 import type { FastifyInstance } from 'fastify';
+import { liveBridge } from './live-sessions.js';
+import { listSessions as sdkListSessions } from '@anthropic-ai/claude-agent-sdk';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -89,6 +91,15 @@ export function registerProjectRoutes(app: FastifyInstance) {
       if (e.code !== 'ENOENT') throw e;
       return { sessions: [] };
     }
+    // Model: server.ListSessions rule-403 — row title = SDK summary
+    // (custom-title > ai-title > first prompt). One listSessions call, keyed
+    // by sessionId; failures just leave titles empty.
+    const titleById = new Map<string, string>();
+    try {
+      for (const s of await sdkListSessions({ dir: project.path, includeWorktrees: false })) {
+        if (s.summary) titleById.set(s.sessionId, s.summary);
+      }
+    } catch {}
     const items = await Promise.all(
       files
         .filter((f) => f.endsWith('.jsonl'))
@@ -127,7 +138,10 @@ export function registerProjectRoutes(app: FastifyInstance) {
             mtime: st.mtimeMs,
             size: st.size,
             preview: preview.slice(0, 120),
+            title: titleById.get(uuid) ?? null,
             wire,
+            // Model: server.ListSessions — which bridge holds a process now.
+            live: liveBridge(uuid),
           };
         }),
     );

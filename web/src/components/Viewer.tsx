@@ -4,27 +4,13 @@ import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus, oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { Theme } from '../types';
+import { CODE_EXT, extOf, isTextFile } from '../lib/textFiles';
 
 function prismStyle(theme: Theme) {
   return theme === 'light' ? oneLight : vscDarkPlus;
 }
 
 type Stat = { path: string; size: number; isDir: boolean; mime: string };
-
-const CODE_EXT: Record<string, string> = {
-  ts: 'typescript', tsx: 'tsx', js: 'javascript', jsx: 'jsx', json: 'json',
-  py: 'python', rb: 'ruby', go: 'go', rs: 'rust', java: 'java', kt: 'kotlin',
-  c: 'c', h: 'c', cpp: 'cpp', hpp: 'cpp', cs: 'csharp', php: 'php',
-  sh: 'bash', bash: 'bash', zsh: 'bash', fish: 'bash',
-  yaml: 'yaml', yml: 'yaml', toml: 'toml', xml: 'xml', html: 'markup', css: 'css', scss: 'scss',
-  sql: 'sql', swift: 'swift', lua: 'lua', vim: 'vim', dockerfile: 'docker',
-};
-
-function extOf(p: string): string {
-  const dot = p.lastIndexOf('.');
-  if (dot < 0) return '';
-  return p.slice(dot + 1).toLowerCase();
-}
 
 export function Viewer({ projectId, file, theme }: { projectId: string; file: { path: string }; theme: Theme }) {
   const codeStyle = prismStyle(theme);
@@ -44,16 +30,7 @@ export function Viewer({ projectId, file, theme }: { projectId: string; file: { 
         if (aborted) return;
         setStat(s);
 
-        const ext = extOf(file.path);
-        const isText =
-          s.mime.startsWith('text/') ||
-          s.mime === 'application/json' ||
-          s.mime === 'application/xml' ||
-          s.mime === 'application/javascript' ||
-          ext in CODE_EXT ||
-          ext === 'md' ||
-          ext === 'markdown';
-        if (isText) {
+        if (isTextFile(s.mime, file.path)) {
           const r = await fetch(`/api/fs/file?project=${projectId}&path=${encodeURIComponent(file.path)}`);
           if (!r.ok) throw new Error(`load failed: ${r.status}`);
           const t = await r.text();

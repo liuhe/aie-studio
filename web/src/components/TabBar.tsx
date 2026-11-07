@@ -5,11 +5,11 @@ import { activityMark } from '../lib/tabActivity';
 import { TabActivityMark } from './TabActivityMark';
 
 export function tabLabel(tab: Tab): string {
-  if (tab.type === 'file') {
+  if (tab.type === 'file' || tab.type === 'editor') {
     const parts = tab.path.split('/');
     return parts[parts.length - 1] || tab.path;
   }
-  if (tab.type === 'session' || tab.type === 'devin') {
+  if (tab.type === 'session' || tab.type === 'devin' || tab.type === 'claude-sdk') {
     const idPart = tab.resumeId ? tab.resumeId.slice(0, 8) : '';
     const fallback = tab.type === 'devin' ? 'Devin session' : 'AI session';
     // Wire-capture mark comes from Tab.wire, not the title: titles persisted
@@ -17,7 +17,7 @@ export function tabLabel(tab: Tab): string {
     // mark shows once and survives renames.
     const title = tab.title?.replace(/\s*⚡$/, '');
     const base = title && idPart ? `${idPart} · ${title}` : title || idPart || fallback;
-    return tab.type === 'session' && tab.wire ? `${base} ⚡` : base;
+    return (tab.type === 'session' || tab.type === 'claude-sdk') && tab.wire ? `${base} ⚡` : base;
   }
   // Tabs persisted before 2026-11-01 carry a "👁 " prefix in the title; strip
   // it so the icon slot is the only eye.
@@ -31,18 +31,30 @@ export function tabLabel(tab: Tab): string {
 
 // Vendored favicons (web/public/icons) for the two AI providers so the tab
 // strip reads like a browser's: recognisable brand marks instead of emoji.
+// Shared by the tab strip and the ⋮ menu's New / Resume items (model:
+// MainShell display mapping) so a session type always has one mark.
+export function providerIcon(provider: 'session' | 'devin'): ReactNode {
+  if (provider === 'devin') return <img className="tab-icon-devin" src="/icons/devin.png" alt="" />;
+  return <img src="/icons/claude.png" alt="" />;
+}
+
 export function tabIcon(tab: Tab): ReactNode {
   if (tab.type === 'file') return '📄';
-  if (tab.type === 'devin') return <img className="tab-icon-devin" src="/icons/devin.png" alt="" />;
-  if (tab.type === 'session') return <img src="/icons/claude.png" alt="" />;
+  if (tab.type === 'editor') return '✎';
+  if (tab.type === 'devin' || tab.type === 'session') return providerIcon(tab.type);
+  // Model: MainShell display mapping — Claude mark plus a small "sdk" tag so
+  // the two Claude bridges are telling apart in the strip.
+  if (tab.type === 'claude-sdk') return <>{providerIcon('session')}<span className="tab-sdk-mark">sdk</span></>;
   if (tab.type === 'observe') return '👁';
   return '🧩';
 }
 
 export function tabTitle(tab: Tab): string {
   if (tab.type === 'file') return tab.path;
+  if (tab.type === 'editor') return `Edit ${tab.path}`;
   if (tab.type === 'devin') return 'Devin session';
   if (tab.type === 'session') return 'AI session';
+  if (tab.type === 'claude-sdk') return 'Claude session (Agent SDK)';
   if (tab.type === 'observe') return `Observe ${tab.origin.type} ${tab.origin.key}`;
   const kindId: string = (tab as Tab).type;
   return listTabKinds().find((k) => k.id === kindId)?.label ?? kindId;
@@ -56,6 +68,8 @@ export function TabBar({
   onNewSession,
   onNewWireSession,
   onResumeSession,
+  claudeBridge,
+  onRenameSdkSession,
   onNewDevinSession,
   onResumeDevinSession,
   onOpenTabKind,
@@ -79,11 +93,18 @@ export function TabBar({
   activeTabId: string | null;
   onActivate: (id: string) => void;
   onClose: (id: string) => void;
-  onNewSession: () => void;
+  // Absent when the device has Claude disabled (Settings → Claude).
+  onNewSession?: () => void;
   // Model: web.WireCaptureSession — a fresh Claude session whose API traffic
   // is recorded by the server's wire proxy.
   onNewWireSession?: () => void;
   onResumeSession?: () => void;
+  // Which bridge the Claude items open (device-local pref; shown in their
+  // tooltips). App wires onNewSession / onResumeSession accordingly.
+  claudeBridge?: 'sdk' | 'cli';
+  // Model: web.RenameSdkSession — only offered for the active claude-sdk tab
+  // once it has a session id.
+  onRenameSdkSession?: (tab: Tab) => void;
   onNewDevinSession?: () => void;
   onResumeDevinSession?: () => void;
   onOpenTabKind?: (kindId: string) => void;
@@ -107,8 +128,9 @@ export function TabBar({
 }) {
   const [open, setOpen] = useState(false);
   const activeForMenu = tabs.find((t) => t.id === activeTabId);
-  const observable = !!onObserve && !!activeForMenu && (activeForMenu.type === 'session' || activeForMenu.type === 'devin');
-  const observeEnabled = !!activeForMenu && (activeForMenu.type === 'session' || activeForMenu.type === 'devin') && !!activeForMenu.resumeId;
+  const observableKind = (t: Tab) => t.type === 'session' || t.type === 'claude-sdk' || t.type === 'devin';
+  const observable = !!onObserve && !!activeForMenu && observableKind(activeForMenu);
+  const observeEnabled = !!activeForMenu && observableKind(activeForMenu) && !!activeForMenu.resumeId;
   // Drill-down level of the overflow menu; 'move' shows the Group list for
   // "Move tab to …" (model: web.MoveTabToGroup). Reset whenever the menu closes.
   const [submenu, setSubmenu] = useState<'move' | null>(null);
@@ -243,43 +265,55 @@ export function TabBar({
                 onClick={() => { setOpen(false); onObserve!(activeForMenu); }}
               >👁 Observe this session</button>
             )}
+            {onRenameSdkSession && activeForMenu?.type === 'claude-sdk' && (
+              <button
+                className="overflow-action"
+                disabled={!activeForMenu.resumeId}
+                title={activeForMenu.resumeId ? 'Give this session a persistent name (shown in the resume list too)' : 'The session has not started yet'}
+                onClick={() => { setOpen(false); onRenameSdkSession(activeForMenu); }}
+              >✎ Rename session</button>
+            )}
             {onMoveTab && activeTabId && (moveTargets ?? []).length > 0 && (
               <button
                 className="overflow-action overflow-submenu"
                 onClick={() => setSubmenu('move')}
               >→ Move tab to …<span className="overflow-chevron">›</span></button>
             )}
-            {activeTabId && ((onRefresh || onExport || observable) || (onMoveTab && (moveTargets ?? []).length > 0)) && (
+            {activeTabId && ((onRefresh || onExport || observable || (onRenameSdkSession && activeForMenu?.type === 'claude-sdk')) || (onMoveTab && (moveTargets ?? []).length > 0)) && (
               <div className="overflow-divider" />
             )}
-            <button
-              className="overflow-action"
-              onClick={() => { setOpen(false); onNewSession(); }}
-            >+ New Claude session</button>
+            {onNewSession && (
+              <button
+                className="overflow-action overflow-provider"
+                title={claudeBridge === 'cli' ? 'Classic bridge (claude -p subprocess). Change in Settings → Claude bridge.' : 'Agent SDK bridge: AI-generated session titles, renamable. Change in Settings → Claude bridge.'}
+                onClick={() => { setOpen(false); onNewSession(); }}
+              ><span className="overflow-glyph">+</span><span className="tab-icon">{providerIcon('session')}</span>New Claude session</button>
+            )}
             {onNewWireSession && (
               <button
-                className="overflow-action"
+                className="overflow-action overflow-provider"
                 title="New Claude session whose API calls are routed through the local wire proxy. Every request and response (plaintext prompts included) is written under <project>/.aie/observations/wire/ for the observe tab. Applies only to sessions started from that tab."
                 onClick={() => { setOpen(false); onNewWireSession(); }}
-              >⚡ New Claude session (wire capture)</button>
+              ><span className="overflow-glyph">⚡</span><span className="tab-icon">{providerIcon('session')}</span>New Claude session (wire capture)</button>
             )}
             {onResumeSession && (
               <button
-                className="overflow-action"
+                className="overflow-action overflow-provider"
+                title={claudeBridge === 'cli' ? 'Resume in a classic Claude tab' : 'Resume in an Agent SDK Claude tab'}
                 onClick={() => { setOpen(false); onResumeSession(); }}
-              >↻ Resume Claude session</button>
+              ><span className="overflow-glyph">↻</span><span className="tab-icon">{providerIcon('session')}</span>Resume Claude session</button>
             )}
             {onNewDevinSession && (
               <button
-                className="overflow-action"
+                className="overflow-action overflow-provider"
                 onClick={() => { setOpen(false); onNewDevinSession(); }}
-              >+ New Devin session</button>
+              ><span className="overflow-glyph">+</span><span className="tab-icon">{providerIcon('devin')}</span>New Devin session</button>
             )}
             {onResumeDevinSession && (
               <button
-                className="overflow-action"
+                className="overflow-action overflow-provider"
                 onClick={() => { setOpen(false); onResumeDevinSession(); }}
-              >↻ Resume Devin session</button>
+              ><span className="overflow-glyph">↻</span><span className="tab-icon">{providerIcon('devin')}</span>Resume Devin session</button>
             )}
             {onOpenTabKind && listTabKinds()
               .filter((k) => k.createAction)

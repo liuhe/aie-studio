@@ -26,12 +26,15 @@ import {
   putProjectWorkspace,
   listResumableSessions,
   listDevinSessions,
+  listSdkSessions,
+  renameSdkSession,
   getSettings,
   putSettings,
   getAuthStatus,
   logout,
 } from './api';
-import type { Project, Tab, Group, Batch, Comment, TabRef, Workspace, ProjectWorkspace, Settings } from './types';
+import { rewriteMovedPath } from './lib/movedPath';
+import type { Project, Tab, Group, Batch, Comment, TabRef, Workspace, ProjectWorkspace, Settings, LocalPrefs, ClaudeBridge } from './types';
 import { DEFAULT_GROUP_ID, DEFAULT_GROUP_NAME, tabGroupId, tabRef, sameTabRef } from './types';
 import { isStandalone } from './usePwaInstall';
 
@@ -54,7 +57,11 @@ const LS_PREFIX = IS_PWA ? 'remote-ide:pwa:' : 'remote-ide:browser:';
 // different tabs within the same project. The tabs list itself stays on the
 // server (shared across windows).
 const ACTIVE_LS_KEY = `${LS_PREFIX}active`;
-const DL_MODE_LS_KEY = `${LS_PREFIX}downloadMode`;
+// Device-local prefs (model: web entity Settings claudeBridge / showWireMenu).
+const CLAUDE_BRIDGE_LS_KEY = `${LS_PREFIX}claudeBridge`;
+const SHOW_WIRE_MENU_LS_KEY = `${LS_PREFIX}showWireMenu`;
+const ENABLE_CLAUDE_LS_KEY = `${LS_PREFIX}enableClaude`;
+const ENABLE_DEVIN_LS_KEY = `${LS_PREFIX}enableDevin`;
 // Which list the left sidebar shows: the file tree or the tab-group list.
 const SIDEBAR_VIEW_LS_KEY = `${LS_PREFIX}sidebarView`;
 // Desktop sidebar width (model: web.ResizeSidebar). null = CSS default (260px).
@@ -86,8 +93,19 @@ type ActiveState = {
   groups: Record<string, string | null>;
 };
 
-function loadDownloadMode(): boolean {
-  try { return localStorage.getItem(DL_MODE_LS_KEY) === '1'; } catch { return false; }
+function loadLocalPrefs(): LocalPrefs {
+  let claudeBridge: ClaudeBridge = 'sdk';
+  let showWireMenu = false;
+  let enableClaude = true;
+  let enableDevin = true;
+  try {
+    if (localStorage.getItem(CLAUDE_BRIDGE_LS_KEY) === 'cli') claudeBridge = 'cli';
+    showWireMenu = localStorage.getItem(SHOW_WIRE_MENU_LS_KEY) === '1';
+    // Absent = enabled, so existing devices keep both providers.
+    enableClaude = localStorage.getItem(ENABLE_CLAUDE_LS_KEY) !== '0';
+    enableDevin = localStorage.getItem(ENABLE_DEVIN_LS_KEY) !== '0';
+  } catch {}
+  return { claudeBridge, showWireMenu, enableClaude, enableDevin };
 }
 
 function loadSidebarView(): SidebarView {
@@ -117,17 +135,6 @@ function loadCurrentBatches(): Record<string, string> {
     const v = JSON.parse(localStorage.getItem(REVIEW_CURRENT_BATCH_LS_KEY) ?? '{}');
     return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
   } catch { return {}; }
-}
-
-function triggerDownload(projectId: string, filePath: string) {
-  const filename = filePath.split('/').pop() || 'download';
-  const a = document.createElement('a');
-  a.href = `/api/fs/file?project=${encodeURIComponent(projectId)}&path=${encodeURIComponent(filePath)}`;
-  a.download = filename;
-  a.rel = 'noopener';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
 }
 
 function projectIdFromHash(): string | null {
@@ -326,10 +333,15 @@ export default function App() {
     if (appToastTimer.current) window.clearTimeout(appToastTimer.current);
     appToastTimer.current = window.setTimeout(() => setAppToast(null), 2500);
   }, []);
-  const [downloadMode, setDownloadMode] = useState<boolean>(() => loadDownloadMode());
+  const [localPrefs, setLocalPrefs] = useState<LocalPrefs>(() => loadLocalPrefs());
   useEffect(() => {
-    try { localStorage.setItem(DL_MODE_LS_KEY, downloadMode ? '1' : '0'); } catch {}
-  }, [downloadMode]);
+    try {
+      localStorage.setItem(CLAUDE_BRIDGE_LS_KEY, localPrefs.claudeBridge);
+      localStorage.setItem(SHOW_WIRE_MENU_LS_KEY, localPrefs.showWireMenu ? '1' : '0');
+      localStorage.setItem(ENABLE_CLAUDE_LS_KEY, localPrefs.enableClaude ? '1' : '0');
+      localStorage.setItem(ENABLE_DEVIN_LS_KEY, localPrefs.enableDevin ? '1' : '0');
+    } catch {}
+  }, [localPrefs]);
   const [sidebarView, setSidebarView] = useState<SidebarView>(() => loadSidebarView());
   useEffect(() => {
     try { localStorage.setItem(SIDEBAR_VIEW_LS_KEY, sidebarView); } catch {}
@@ -440,6 +452,12 @@ export default function App() {
     api.insertPrompt(text, batchId);
     return true;
   }, []);
+  // Model: web.CloseTab — per-tab "may I close?" guards (EditorPanel).
+  const closeGuardRef = useRef<Map<string, () => boolean>>(new Map());
+  const registerCloseGuard = useCallback((tabId: string, guard: (() => boolean) | null) => {
+    if (guard) closeGuardRef.current.set(tabId, guard);
+    else closeGuardRef.current.delete(tabId);
+  }, []);
   const registerPanelApi = useCallback((tabId: string, api: SessionPanelApi | null) => {
     if (api) panelApiRef.current.set(tabId, api);
     else panelApiRef.current.delete(tabId);
@@ -482,7 +500,6 @@ export default function App() {
     if (bootRanRef.current) return;
     bootRanRef.current = true;
     for (const msg of bootEvents) logDebug('init', msg);
-    logDebug('init', `downloadMode = ${downloadMode}`);
     (async () => {
       const auth = await getAuthStatus();
       logDebug(
@@ -879,6 +896,14 @@ export default function App() {
         setActiveTab(activeProjectId, existing.id);
         return existing.id;
       }
+      // OpenTab cross-kind dedupe (Claude Session invariant): already open
+      // as an SDK tab → go there instead of starting a second process.
+      const other = tabs.find((t) => t.type === 'claude-sdk' && t.resumeId === resumeId);
+      if (other) {
+        logDebug('tab', `openSessionTab: session ${resumeId} already open as claude-sdk (tab ${other.id}), activating`);
+        setActiveTab(activeProjectId, other.id);
+        return other.id;
+      }
     }
     const d = new Date();
     const defaultTitle = `Chat ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
@@ -888,6 +913,123 @@ export default function App() {
     setActiveSelection(activeProjectId, activeGroupId, tab.id);
     return tab.id;
   }
+
+  // Model: web.SdkChatPanel / web.SdkSessionPicker — the Agent-SDK Claude
+  // tab. Same dedupe-by-resumeId as openSessionTab; the two kinds are kept
+  // apart (a session already open as `session` opens again as `claude-sdk`).
+  function openSdkTab(resumeId?: string, title?: string, opts: { wire?: boolean } = {}): string | undefined {
+    if (!activeProjectId) {
+      logDebug('tab', 'openSdkTab ignored — no active project');
+      return;
+    }
+    if (resumeId) {
+      const existing = tabs.find((t) => t.type === 'claude-sdk' && t.resumeId === resumeId);
+      if (existing) {
+        logDebug('tab', `openSdkTab: session ${resumeId} already open (tab ${existing.id}), activating`);
+        setActiveTab(activeProjectId, existing.id);
+        return existing.id;
+      }
+      // OpenTab cross-kind dedupe (Claude Session invariant): already open
+      // as a classic Claude tab → go there instead of starting a second process.
+      const other = tabs.find((t) => t.type === 'session' && t.resumeId === resumeId);
+      if (other) {
+        logDebug('tab', `openSdkTab: session ${resumeId} already open as session (tab ${other.id}), activating`);
+        setActiveTab(activeProjectId, other.id);
+        return other.id;
+      }
+    }
+    const d = new Date();
+    const defaultTitle = `SDK ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    const tab: Tab = { id: randomId(), type: 'claude-sdk', resumeId, title: title || defaultTitle, groupId: activeGroupId, ...(opts.wire ? { wire: true } : {}) };
+    logDebug('tab', `openSdkTab: new claude-sdk tab ${tab.id}${resumeId ? ` (resume ${resumeId})` : ' (fresh)'} in project ${activeProjectId} group ${activeGroupId}`);
+    updateProjectTabs(activeProjectId, [...tabs, tab]);
+    setActiveSelection(activeProjectId, activeGroupId, tab.id);
+    return tab.id;
+  }
+
+  // Model: web.RenameSdkSession — persistent name via the SDK (custom-title
+  // record), reflected on the tab right away.
+  async function renameSdkTab(tab: Tab) {
+    if (tab.type !== 'claude-sdk' || !tab.resumeId || !activeProjectId) return;
+    const next = window.prompt('Session name', tab.title ?? '');
+    if (next == null) return;
+    const title = next.trim();
+    if (!title) return;
+    try {
+      await renameSdkSession(activeProjectId, tab.resumeId, title);
+      const pid = activeProjectId;
+      const live = workspaceRef.current.projects[pid]?.tabs ?? [];
+      updateProjectTabs(pid, live.map((x) => (x.id === tab.id ? { ...x, title } : x)));
+    } catch (e: any) {
+      alert(`Rename failed: ${e?.message ?? e}`);
+    }
+  }
+
+  // Resume (rule-078 / rule-378): a session whose process is still live in
+  // some bridge opens as that bridge's tab kind so we attach instead of being
+  // refused; otherwise the device's claudeBridge preference decides.
+  function openResumedClaude(sessionId: string, title: string, live: 'cli' | 'sdk' | null | undefined) {
+    const kind = live ?? localPrefs.claudeBridge;
+    if (kind === 'cli') openSessionTab(sessionId, title);
+    else openSdkTab(sessionId, title);
+  }
+  function liveBadge(live: 'cli' | 'sdk' | null | undefined): string | undefined {
+    if (live === 'sdk') return '● live · SDK tab';
+    if (live === 'cli') return '● live · classic tab';
+    return undefined;
+  }
+
+  // Model: web.SessionPicker — resume list for the classic bridge.
+  const resumeCliSessions = async () => {
+    if (!activeProject) return;
+    const list = await listResumableSessions(activeProject.id);
+    if (list.length === 0) {
+      alert('No resumable Claude sessions for this project');
+      return;
+    }
+    const items: PickerItem[] = list.map((s) => ({
+      id: s.uuid,
+      primary: s.title || s.preview || s.uuid.slice(0, 8),
+      secondary: s.uuid.slice(0, 8),
+      timestamp: s.mtime,
+      badge: liveBadge(s.live) ?? (s.wire ? `⚡ ${s.wire} wire` : undefined),
+    }));
+    setPicker({
+      title: 'Resume Claude session',
+      items,
+      onPick: (uuid) => {
+        const s = list.find((x) => x.uuid === uuid);
+        if (s) openResumedClaude(s.uuid, s.title || s.preview.slice(0, 30) || s.uuid.slice(0, 8), s.live);
+        setPicker(null);
+      },
+    });
+  };
+
+  // Model: web.SdkSessionPicker — resume list for the Agent SDK bridge.
+  const resumeSdkSessions = async () => {
+    if (!activeProject) return;
+    const list = await listSdkSessions(activeProject.id);
+    if (list.length === 0) {
+      alert('No resumable Claude sessions for this project');
+      return;
+    }
+    const items: PickerItem[] = list.map((s) => ({
+      id: s.sessionId,
+      primary: s.title || s.sessionId.slice(0, 8),
+      secondary: s.sessionId.slice(0, 8),
+      timestamp: s.lastModified,
+      badge: liveBadge(s.liveIn),
+    }));
+    setPicker({
+      title: 'Resume Claude session',
+      items,
+      onPick: (sid) => {
+        const s = list.find((x) => x.sessionId === sid);
+        if (s) openResumedClaude(s.sessionId, s.title || s.sessionId.slice(0, 8), s.liveIn);
+        setPicker(null);
+      },
+    });
+  };
 
   function openDevinTab(resumeId?: string, title?: string): string | undefined {
     if (!activeProjectId) {
@@ -923,7 +1065,23 @@ export default function App() {
       openFileTab(newTab.path);
       return;
     }
-    const tab: Tab = { ...newTab, groupId: activeGroupId };
+    // Editor tabs dedupe on path too, independently of file tabs (a file may
+    // be open read-only and in the editor at once).
+    if (newTab.type === 'editor') {
+      const existing = tabs.find((t) => t.type === 'editor' && t.path === newTab.path);
+      if (existing) {
+        logDebug('tab', `openTab: editor for ${newTab.path} already open (tab ${existing.id}), activating`);
+        setActiveTab(activeProjectId, existing.id);
+        return;
+      }
+    }
+    // rule-071: panels ask for a `session` tab; the device's bridge
+    // preference decides which Claude kind actually opens (initialPrompt /
+    // wire carried over). Resumes keep their requested kind.
+    const requested: Tab = newTab.type === 'session' && !newTab.resumeId && localPrefs.claudeBridge === 'sdk'
+      ? { id: newTab.id, type: 'claude-sdk', title: newTab.title, initialPrompt: newTab.initialPrompt, wire: newTab.wire }
+      : newTab;
+    const tab: Tab = { ...requested, groupId: activeGroupId };
     logDebug('tab', `openTab: new ${tab.type} tab ${tab.id} in project ${activeProjectId} group ${activeGroupId}`);
     updateProjectTabs(activeProjectId, [...tabs, tab]);
     setActiveSelection(activeProjectId, activeGroupId, tab.id);
@@ -958,11 +1116,14 @@ export default function App() {
   // tab; one observe tab per source session per project.
   function observeTab(src: Tab) {
     if (!activeProjectId) return;
-    if ((src.type !== 'session' && src.type !== 'devin') || !src.resumeId) {
+    if ((src.type !== 'session' && src.type !== 'claude-sdk' && src.type !== 'devin') || !src.resumeId) {
       logDebug('tab', `observeTab ignored — ${src.type} tab without resumeId`);
       return;
     }
-    const origin: TabRef = { type: src.type, key: src.resumeId };
+    // A claude-sdk tab observes the same jsonl + wire directory as a classic
+    // one, so its origin is recorded as `session` (rule-325): one observe
+    // tab per Claude session whichever bridge drives it.
+    const origin: TabRef = { type: src.type === 'claude-sdk' ? 'session' : src.type, key: src.resumeId };
     const existing = tabs.find((t) => t.type === 'observe' && sameTabRef(t.origin, origin));
     if (existing) {
       logDebug('tab', `observeTab: ${origin.type} ${origin.key} already observed (tab ${existing.id}), activating`);
@@ -986,6 +1147,12 @@ export default function App() {
       logDebug('tab', `closeTab(${id}) ignored — tab not found`);
       return;
     }
+    const guard = closeGuardRef.current.get(id);
+    if (guard && !guard()) {
+      logDebug('tab', `closeTab(${id}) vetoed by the panel's close guard`);
+      return;
+    }
+    closeGuardRef.current.delete(id);
     const nextTabs = tabs.filter((t) => t.id !== id);
     logDebug('tab', `closeTab: closed tab ${id} in project ${activeProjectId} (${tabs.length} → ${nextTabs.length})`);
     updateProjectTabs(activeProjectId, nextTabs);
@@ -1217,7 +1384,7 @@ export default function App() {
   const commentMarksByTab = useMemo(() => {
     const map = new Map<string, review.CommentMark[]>();
     for (const t of tabs) {
-      if (t.type !== 'session' && t.type !== 'devin') continue;
+      if (t.type !== 'session' && t.type !== 'claude-sdk' && t.type !== 'devin') continue;
       const ref = tabRef(t);
       const marks = ref ? review.commentMarksFor(batches, ref) : [];
       if (marks.length) map.set(t.id, marks);
@@ -1235,7 +1402,9 @@ export default function App() {
       setActiveTab(activeProjectId, existing.id);
       return existing.id;
     }
-    if (ref.type === 'session') return openSessionTab(ref.key, title);
+    // rule-405: a Claude session ref opens as whichever kind the device
+    // prefers (both openers dedupe across kinds first).
+    if (ref.type === 'session' || ref.type === 'claude-sdk') return localPrefs.claudeBridge === 'sdk' ? openSdkTab(ref.key, title) : openSessionTab(ref.key, title);
     if (ref.type === 'devin') return openDevinTab(ref.key, title);
     // Non-session tabs have no panel API to follow up with; no id needed.
     if (ref.type === 'file') openFileTab(ref.key);
@@ -1275,7 +1444,7 @@ export default function App() {
     const target = review.batchTargetSession(batch);
     let tabId: string | undefined;
     if (target) tabId = openTabRef(target, batch.name);
-    else if (activeTab && (activeTab.type === 'session' || activeTab.type === 'devin')) tabId = activeTab.id;
+    else if (activeTab && (activeTab.type === 'session' || activeTab.type === 'claude-sdk' || activeTab.type === 'devin')) tabId = activeTab.id;
     if (!tabId) {
       showAppToast('Open the session tab you want to send this batch to');
       return;
@@ -1411,8 +1580,6 @@ export default function App() {
               onOpenSettings={() => setSettingsOpen(true)}
               onOpenDevinUsage={() => setDevinUsageOpen(true)}
               onOpenDebug={() => setDebugOpen(true)}
-              downloadMode={downloadMode}
-              onToggleDownloadMode={() => setDownloadMode((v) => !v)}
               sidebarView={sidebarView}
               onToggleSidebarView={() => setSidebarView((v) => (v === 'files' ? 'groups' : 'files'))}
             />
@@ -1424,14 +1591,30 @@ export default function App() {
               <FileTree
                 projectId={activeProject.id}
                 onSelect={(p) => {
-                  if (downloadMode) {
-                    triggerDownload(activeProject.id, p);
-                    return;
-                  }
                   openFileTab(p);
                   setDrawerOpen(false);
                 }}
+                onEdit={(p) => {
+                  openTab({ id: randomId(), type: 'editor', path: p });
+                  setDrawerOpen(false);
+                }}
                 selectedPath={activeTab?.type === 'file' ? activeTab.path : null}
+                // Model: web.FileTree rule-413 — open file Tabs follow a
+                // rename / move; Tab ids are stable so the Viewer just reloads.
+                onEntryMoved={(from, to) => {
+                  const pid = activeProject.id;
+                  const live = workspaceRef.current.projects[pid]?.tabs ?? [];
+                  let changed = false;
+                  const next = live.map((t) => {
+                    if (t.type !== 'file' && t.type !== 'editor') return t;
+                    const np = rewriteMovedPath(t.path, from, to);
+                    if (np === null) return t;
+                    changed = true;
+                    return { ...t, path: np };
+                  });
+                  if (changed) updateProjectTabs(pid, next);
+                }}
+                onNotice={showAppToast}
               />
             ) : (
               <GroupList
@@ -1474,40 +1657,18 @@ export default function App() {
             ...groups.filter((g) => g.id !== activeGroupId),
           ]}
           onMoveTab={moveTabToGroup}
-          onNewSession={() => openSessionTab()}
-          onNewWireSession={() => openSessionTab(undefined, undefined, { wire: true })}
+          claudeBridge={localPrefs.claudeBridge}
+          // Model: web entity Settings.enableClaude — provider entry points
+          // only; everything else keeps working.
+          onNewSession={localPrefs.enableClaude ? () => (localPrefs.claudeBridge === 'sdk' ? openSdkTab() : openSessionTab()) : undefined}
+          onNewWireSession={localPrefs.enableClaude && localPrefs.showWireMenu ? () => (localPrefs.claudeBridge === 'sdk' ? openSdkTab(undefined, undefined, { wire: true }) : openSessionTab(undefined, undefined, { wire: true })) : undefined}
           onOpenTabKind={openTabOfKind}
           onObserve={observeTab}
-          onResumeSession={
-            activeProject
-              ? async () => {
-                  const list = await listResumableSessions(activeProject.id);
-                  if (list.length === 0) {
-                    alert('No resumable Claude sessions for this project');
-                    return;
-                  }
-                  const items: PickerItem[] = list.map((s) => ({
-                    id: s.uuid,
-                    primary: s.preview || s.uuid.slice(0, 8),
-                    secondary: s.uuid.slice(0, 8),
-                    timestamp: s.mtime,
-                    badge: s.wire ? `⚡ ${s.wire} wire` : undefined,
-                  }));
-                  setPicker({
-                    title: 'Resume Claude session',
-                    items,
-                    onPick: (uuid) => {
-                      const s = list.find((x) => x.uuid === uuid);
-                      if (s) openSessionTab(s.uuid, s.preview.slice(0, 30) || s.uuid.slice(0, 8));
-                      setPicker(null);
-                    },
-                  });
-                }
-              : undefined
-          }
-          onNewDevinSession={activeProject ? () => openDevinTab() : undefined}
+          onResumeSession={activeProject && localPrefs.enableClaude ? (localPrefs.claudeBridge === 'sdk' ? resumeSdkSessions : resumeCliSessions) : undefined}
+          onRenameSdkSession={(tab) => void renameSdkTab(tab)}
+          onNewDevinSession={activeProject && localPrefs.enableDevin ? () => openDevinTab() : undefined}
           onResumeDevinSession={
-            activeProject
+            activeProject && localPrefs.enableDevin
               ? async () => {
                   const list = await listDevinSessions(activeProject.id);
                   if (list.length === 0) {
@@ -1552,9 +1713,16 @@ export default function App() {
                   tab,
                   project: activeProject,
                   settings,
+                  // Model: TabKindRegistry rule-367 — feed the updater the live
+                  // tabs from workspaceRef, not this render's snapshot. Panels
+                  // call this from WS handlers captured at mount (ChatPanel /
+                  // DevinPanel [projectId] effects); with the snapshot, the
+                  // init-time resumeId write clobbered the title set by the
+                  // first prompt (and any tab opened since mount).
                   updateTabs: (updater) => {
-                    if (!activeProjectId) return;
-                    updateProjectTabs(activeProjectId, updater(tabs));
+                    const pid = activeProject.id;
+                    const live = workspaceRef.current.projects[pid]?.tabs ?? [];
+                    updateProjectTabs(pid, updater(live));
                   },
                   openTab,
                   updateSettings,
@@ -1564,6 +1732,7 @@ export default function App() {
                   markBatchSent,
                   focusComment,
                   registerPanelApi: (api) => registerPanelApi(tab.id, api),
+                  registerCloseGuard: (guard) => registerCloseGuard(tab.id, guard),
                   revealInSession,
                   reportActivity: (a) => reportActivity(tab.id, a),
                 }) : <div className="empty">Unknown tab kind: {tab.type}</div>;
@@ -1637,6 +1806,8 @@ export default function App() {
       {settingsOpen && (
         <SettingsModal
           settings={settings}
+          local={localPrefs}
+          onLocalChange={setLocalPrefs}
           username={authState?.username}
           onChange={updateSettings}
           onClose={() => setSettingsOpen(false)}

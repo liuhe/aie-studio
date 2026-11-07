@@ -171,7 +171,9 @@ body {
   .drawer {
     display: flex;
     position: fixed;
-    inset: 0 30% 0 0;
+    /* Model: web.ResizeSidebar rule-146 — nearly full width on phones, but
+       always leave a tappable sliver of backdrop (≥48px / 12%) to close. */
+    inset: 0 max(48px, 12%) 0 0;
     z-index: 20;
     background: var(--bg);
     transform: translateX(-100%);
@@ -293,16 +295,6 @@ body {
   color: var(--accent);
 }
 .picker-add-action:hover, .picker-add-action:active { background: var(--bg-active); color: var(--fg-strong); }
-.picker-toggle {
-  padding: 10px 12px;
-  cursor: pointer;
-  color: var(--fg);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.picker-toggle:hover, .picker-toggle:active { background: var(--bg-active); color: var(--fg-strong); }
-.picker-toggle-box { font-size: 14px; line-height: 1; }
 /* Project manager dialog (model: web.ProjectManager / page ProjectManagerDialog).
    Shares the Settings modal shell. */
 .pm-modal { max-width: 560px; }
@@ -515,6 +507,9 @@ body {
 .overflow-action:disabled { opacity: 0.4; cursor: not-allowed; }
 .overflow-divider { height: 1px; background: var(--border-strong); margin: 4px 0; }
 .overflow-submenu { display: flex; align-items: center; justify-content: space-between; }
+/* New / Resume items: action glyph (+ / ↻ / ⚡) → provider favicon (same slot as the tab strip) → label. */
+.overflow-provider { display: flex; align-items: center; gap: 8px; }
+.overflow-glyph { display: inline-block; width: 1em; text-align: center; }
 .overflow-chevron { opacity: 0.6; margin-left: 12px; }
 .overflow-back { color: var(--fg-muted); }
 .overflow-heading { padding: 4px 14px 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.6; }
@@ -556,6 +551,63 @@ body {
 .tree-item.selected { background: var(--bg-active); }
 .tree-toggle { width: 14px; display: inline-block; text-align: center; opacity: 0.6; }
 .tree-icon { width: 16px; display: inline-block; text-align: center; margin-right: 4px; }
+.tree-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tree-menu-btn {
+  border: none;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 0 6px;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0;
+}
+.tree-item:hover .tree-menu-btn, .tree-menu-btn:focus { opacity: 1; }
+.tree-menu-btn:hover { color: var(--fg-strong); }
+.tree-rename {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.tree-row-disabled { opacity: 0.45; }
+
+/* Move to… directory picker (model: web.FileTree rule-412) */
+.dirpicker-modal { max-width: 420px; display: flex; flex-direction: column; }
+.dirpicker-body { padding: 8px 0; overflow: auto; max-height: 50vh; min-height: 120px; }
+.dirpicker-row {
+  display: flex;
+  align-items: center;
+  padding: 6px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.dirpicker-row:hover { background: var(--bg-hover); }
+.dirpicker-row.selected { background: var(--bg-active); }
+.dirpicker-row.disabled { opacity: 0.45; cursor: not-allowed; }
+.dirpicker-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+}
+.dirpicker-footer button {
+  font: inherit;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+.dirpicker-footer .dirpicker-newfolder { margin-right: auto; color: var(--accent); }
+.dirpicker-footer button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.dirpicker-footer button:disabled { opacity: 0.4; cursor: not-allowed; }
 .tree-children { padding-left: 12px; }
 
 /* tab group list */
@@ -606,6 +658,7 @@ body {
 @media (max-width: 768px) {
   .group-row { padding: 10px 8px; }
   .group-menu-btn { opacity: 1; min-width: 36px; min-height: 36px; }
+  .tree-menu-btn { opacity: 1; min-width: 36px; min-height: 36px; }
 }
 
 /* viewer */
@@ -633,6 +686,56 @@ body {
 }
 .viewer-toolbar button:hover,
 .viewer-toolbar a:hover { background: var(--bg-hover); }
+/* editor tab (model: web.EditorPanel / page FileEditorView) */
+.editor-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.editor-toolbar { align-items: center; }
+.editor-path { font-size: 12px; color: var(--fg-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.editor-dirty { font-size: 12px; color: #b45309; white-space: nowrap; }
+.editor-status { font-size: 12px; color: var(--fg-muted); white-space: nowrap; }
+.editor-status-err { color: #dc2626; }
+.editor-spacer { flex: 1; }
+.editor-toolbar .editor-save:not(:disabled) { background: var(--accent); border-color: var(--accent); color: #fff; }
+.editor-toolbar button:disabled { opacity: 0.4; cursor: not-allowed; }
+.editor-conflict {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  background: rgba(220, 38, 38, 0.12);
+  border-bottom: 1px solid rgba(220, 38, 38, 0.4);
+  flex-shrink: 0;
+}
+.editor-conflict button {
+  font: inherit;
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+.editor-textarea {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  resize: none;
+  border: none;
+  outline: none;
+  padding: 8px 12px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+}
+@media (max-width: 768px) {
+  /* 16px keeps iOS from zooming the page when the textarea gets focus. */
+  .editor-textarea { font-size: 16px; }
+}
 .viewer-html-body { flex: 1; min-height: 0; position: relative; }
 .viewer-html-body iframe {
   width: 100%;
@@ -1484,7 +1587,29 @@ pre {
   padding: 0 6px;
 }
 .settings-close:hover { color: var(--fg-strong); }
-.settings-body { padding: 16px; }
+/* Grouped panes (model: web.Settings rule-431 / page SettingsPane). */
+.settings-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 12px 0;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+.settings-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-muted);
+  padding: 6px 10px 8px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.settings-tab:hover { color: var(--fg-strong); }
+.settings-tab.active { color: var(--fg-strong); border-bottom-color: var(--accent); }
+.settings-body { padding: 16px; min-height: 240px; }
 .settings-section { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
 .settings-section:last-child { margin-bottom: 0; }
 .settings-label { font-weight: 600; margin-bottom: 4px; color: var(--fg-soft); }
@@ -1918,7 +2043,7 @@ pre {
   .review-drawer {
     display: flex;
     position: fixed;
-    inset: 0 0 0 30%;
+    inset: 0 0 0 max(48px, 12%);
     z-index: 20;
     background: var(--bg);
     transform: translateX(100%);
@@ -2529,3 +2654,6 @@ pre {
 
 /* wire capture chip in the chat status bar (model: web.WireCaptureSession) */
 .chat-status-wire { margin-left: 6px; padding: 1px 6px; border-radius: 8px; font-size: 11px; background: color-mix(in srgb, #c586c0 22%, transparent); color: #c586c0; }
+
+/* claude-sdk tabs: Claude mark + a small "sdk" tag (MainShell display mapping) */
+.tab-sdk-mark { font-size: 9px; line-height: 1; opacity: 0.7; margin-left: 2px; letter-spacing: 0.02em; }

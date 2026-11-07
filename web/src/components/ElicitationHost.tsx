@@ -41,6 +41,11 @@ export function useElicitationHost({ agentName, sendKey, scrollRef, cards, showT
     showToast('Question expired');
   }
   function clear() { setElicitations([]); }
+  // Another client answered, or the agent withdrew the question (SDK bridge:
+  // ask_done / ask_cancel): close the form with the given recap, no toast.
+  function settle(id: number | string, recap: string) {
+    setElicitations((cur) => cur.map((e) => (e.req.id === id && !e.recap ? { ...e, recap } : e)));
+  }
 
   function answer(req: ElicitationRequest, content: Record<string, string | string[]> | null, images: ImageAttachment[] = []) {
     respond(req, content);
@@ -109,5 +114,5 @@ export function useElicitationHost({ agentName, sendKey, scrollRef, cards, showT
       .map((e) => <div key={String(e.req.id)} className="msg msg-tool msg-elicit-orphan">{renderEntry(e)}</div>);
   }
 
-  return { elicitations, pendingCount, add, expire, clear, inputLock, renderFor, renderOrphans };
+  return { elicitations, pendingCount, add, expire, settle, clear, inputLock, renderFor, renderOrphans };
 }

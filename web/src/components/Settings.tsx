@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import type { Settings, SendKey, Theme, FontScale } from '../types';
+import type { Settings, SendKey, Theme, FontScale, LocalPrefs } from '../types';
 import { usePwaInstall } from '../usePwaInstall';
-import { listSettingsSections } from '../registry';
+import { sectionsForGroup, type SettingsGroupId } from '../registry';
 import { useClaudeModels, EFFORT_LEVELS } from '../useClaudeModels';
 import { listDevinVersions, type DevinVersion } from '../api';
 
@@ -69,7 +69,21 @@ const FONT_SCALE_OPTIONS: SelectOption[] = [
   { value: 'xhuge', label: 'Extra Huge', hint: '2.0× — accessibility / projection' },
 ];
 
+// Model: web.Settings rule-431 / page SettingsPane — one pane at a time.
+const GROUPS: { id: SettingsGroupId; label: string }[] = [
+  { id: 'general', label: 'General' },
+  { id: 'claude', label: 'Claude' },
+  { id: 'devin', label: 'Devin' },
+  { id: 'features', label: 'Features' },
+];
+
 // Installed devin CLI versions (model: server.ListDevinVersions). '' = auto.
+// Model: web entity Settings.claudeBridge — which Claude tab kind the ⋮ menu opens.
+const CLAUDE_BRIDGE_OPTIONS: SelectOption[] = [
+  { value: 'sdk', label: 'Agent SDK (default)', hint: 'New / Resume open claude-sdk tabs: AI-generated session titles, ✎ rename, same transcripts as the classic bridge.' },
+  { value: 'cli', label: 'Classic (claude -p subprocess)', hint: 'New / Resume open the original session tabs driven by the hand-rolled stream-json bridge.' },
+];
+
 // A saved version that is no longer installed stays selectable so the user can
 // see it, but the server treats it as auto.
 function devinVersionOptions(versions: DevinVersion[] | null, selected: string): SelectOption[] {
@@ -141,14 +155,38 @@ export function SettingsSelect({
   );
 }
 
+// One checkbox row (label + text + hint); shared by the on/off settings.
+function Toggle({ label, checked, onChange, text, hint }: {
+  label: string; checked: boolean; onChange: (v: boolean) => void; text: string; hint: string;
+}) {
+  return (
+    <div className="settings-section">
+      <div className="settings-label">{label}</div>
+      <label className="settings-option">
+        <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+        <div className="settings-option-text">
+          <div>{text}</div>
+          <div className="settings-option-hint">{hint}</div>
+        </div>
+      </label>
+    </div>
+  );
+}
+
 export function Settings({
   settings,
+  local,
+  onLocalChange,
   username,
   onChange,
   onClose,
   onSignOut,
 }: {
   settings: Settings;
+  // Device-local prefs (localStorage; model: web entity Settings
+  // claudeBridge / showWireMenu). Changes apply immediately, no server round trip.
+  local: LocalPrefs;
+  onLocalChange: (next: LocalPrefs) => void;
   username?: string;
   onChange: (s: Settings) => void;
   onClose: () => void;
@@ -159,6 +197,7 @@ export function Settings({
   // people often wonder if their click took effect).
   const [savedFlash, setSavedFlash] = useState(false);
   const flashTimer = useRef<number | null>(null);
+  const [group, setGroup] = useState<SettingsGroupId>('general');
   const pwa = usePwaInstall();
   const [devinVersions, setDevinVersions] = useState<DevinVersion[] | null>(null);
   useEffect(() => {
@@ -167,11 +206,14 @@ export function Settings({
     return () => { alive = false; };
   }, []);
   const modelCatalog = useClaudeModels();
-  function commit(next: Settings) {
-    onChange(next);
+  function flashSaved() {
     setSavedFlash(true);
     if (flashTimer.current) window.clearTimeout(flashTimer.current);
     flashTimer.current = window.setTimeout(() => setSavedFlash(false), 1200);
+  }
+  function commit(next: Settings) {
+    onChange(next);
+    flashSaved();
   }
 
   const modelOptions: SelectOption[] = [
@@ -184,6 +226,13 @@ export function Settings({
     })),
   ];
 
+  const registered = sectionsForGroup(group).map((section) => (
+    <div key={section.id} className="settings-section">
+      <div className="settings-label">{section.label}</div>
+      {section.render({ settings, commit })}
+    </div>
+  ));
+
   return (
     <div className="settings-backdrop" onClick={onClose}>
       <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
@@ -192,175 +241,210 @@ export function Settings({
           <span className="settings-saved-flash" data-on={savedFlash ? '1' : '0'}>Saved ✓</span>
           <button className="settings-close" onClick={onClose} aria-label="Close">×</button>
         </div>
+        <div className="settings-tabs" role="tablist">
+          {GROUPS.map((g) => (
+            <button
+              key={g.id}
+              role="tab"
+              aria-selected={group === g.id}
+              className={`settings-tab ${group === g.id ? 'active' : ''}`}
+              onClick={() => setGroup(g.id)}
+            >{g.label}</button>
+          ))}
+        </div>
         <div className="settings-body">
-          <SettingsSelect
-            label="Theme"
-            name="theme"
-            value={settings.theme}
-            options={THEME_OPTIONS}
-            onChange={(v) => commit({ ...settings, theme: v as Theme })}
-          />
-          <SettingsSelect
-            label="Default Claude model (new sessions)"
-            name="model"
-            value={settings.model ?? ''}
-            options={modelOptions}
-            showId
-            onChange={(v) => commit({ ...settings, model: v })}
-            footer={
-              <>
-                {modelCatalog.error && (
-                  <div className="settings-option-hint" style={{ color: 'var(--color-error, #d33)' }}>
-                    Catalog unavailable — aliases only. ({modelCatalog.error})
+          {group === 'general' && (
+            <>
+              <SettingsSelect
+                label="Theme"
+                name="theme"
+                value={settings.theme}
+                options={THEME_OPTIONS}
+                onChange={(v) => commit({ ...settings, theme: v as Theme })}
+              />
+              <SettingsSelect
+                label="Font size"
+                name="fontScale"
+                value={settings.fontScale}
+                options={FONT_SCALE_OPTIONS}
+                onChange={(v) => commit({ ...settings, fontScale: v as FontScale })}
+              />
+              <SettingsSelect
+                label="Send message with"
+                name="sendKey"
+                value={settings.sendKey}
+                options={SEND_KEY_OPTIONS}
+                onChange={(v) => commit({ ...settings, sendKey: v as SendKey })}
+              />
+              <div className="settings-section">
+                <div className="settings-label">Install as app</div>
+                {pwa.isInstalled ? (
+                  <div className="settings-option-hint">Already installed on this device.</div>
+                ) : pwa.canInstall ? (
+                  <div className="settings-account-row">
+                    <div className="settings-option-text">
+                      <div>Pin AI Studio to your home screen / launcher.</div>
+                      <div className="settings-option-hint">Standalone window, no browser chrome.</div>
+                    </div>
+                    <button className="settings-signout" onClick={() => pwa.install()}>Install app</button>
+                  </div>
+                ) : (
+                  <div className="settings-option-hint">
+                    Browser hasn't offered installation yet — interact with the app for a bit then reopen Settings, or use the browser menu (Chrome: ⋮ → Install / Add to Home Screen; iOS Safari: Share → Add to Home Screen).
                   </div>
                 )}
-                <div className="settings-option-hint">
-                  Mid-session switching: click the model name in the status bar.
-                  {modelCatalog.cliVersion && <> · claude CLI {modelCatalog.cliVersion}</>}
+              </div>
+              {username && (
+                <div className="settings-section">
+                  <div className="settings-label">Account</div>
+                  <div className="settings-account-row">
+                    <div className="settings-option-text">
+                      <div>Signed in as <code className="settings-mono">{username}</code></div>
+                    </div>
+                    <button className="settings-signout" onClick={onSignOut}>Sign out</button>
+                  </div>
                 </div>
-              </>
-            }
-          />
-          <SettingsSelect
-            label="Default Claude effort (new sessions)"
-            name="effort"
-            value={settings.effort ?? ''}
-            options={EFFORT_OPTIONS}
-            onChange={(v) => commit({ ...settings, effort: v })}
-            footer={
-              <div className="settings-option-hint">
-                Haiku 4.5 and Opus 4.1 ignore effort. Mid-session changes restart the claude process on the same transcript.
-              </div>
-            }
-          />
-          <SettingsSelect
-            label="Default Devin model (new sessions)"
-            name="devinModel"
-            value={settings.devinModel ?? ''}
-            options={DEVIN_MODEL_OPTIONS}
-            showId
-            onChange={(v) => commit({ ...settings, devinModel: v })}
-            footer={
-              <div className="settings-option-hint">
-                Devin's full list (~75 models) is available mid-session via the model picker.
-              </div>
-            }
-          />
-          <SettingsSelect
-            label="Default Devin mode (new sessions)"
-            name="devinMode"
-            value={settings.devinMode ?? ''}
-            options={DEVIN_MODE_OPTIONS}
-            onChange={(v) => commit({ ...settings, devinMode: v })}
-            footer={
-              <div className="settings-option-hint">
-                Applied right after the session starts. Resumed sessions keep their own mode; the status-bar Mode picker still works mid-session.
-              </div>
-            }
-          />
-          <SettingsSelect
-            label="Devin CLI version"
-            name="devinVersion"
-            value={settings.devinVersion ?? ''}
-            options={devinVersionOptions(devinVersions, settings.devinVersion ?? '')}
-            onChange={(v) => commit({ ...settings, devinVersion: v })}
-            footer={
-              <div className="settings-option-hint">
-                Applies to the next Devin session you open. Installed versions are read from <code className="settings-mono">~/.local/share/devin/cli/_versions</code>.
-              </div>
-            }
-          />
-          <SettingsSelect
-            label="Font size"
-            name="fontScale"
-            value={settings.fontScale}
-            options={FONT_SCALE_OPTIONS}
-            onChange={(v) => commit({ ...settings, fontScale: v as FontScale })}
-          />
-          <SettingsSelect
-            label="Send message with"
-            name="sendKey"
-            value={settings.sendKey}
-            options={SEND_KEY_OPTIONS}
-            onChange={(v) => commit({ ...settings, sendKey: v as SendKey })}
-          />
-          <div className="settings-section">
-            <div className="settings-label">Show stderr output</div>
-            <label className="settings-option">
-              <input
-                type="checkbox"
-                checked={settings.showStderr ?? false}
-                onChange={(e) => commit({ ...settings, showStderr: e.target.checked })}
-              />
-              <div className="settings-option-text">
-                <div>Show stderr in chat</div>
-                <div className="settings-option-hint">Display stderr messages from AI processes (can be noisy)</div>
-              </div>
-            </label>
-          </div>
-          <div className="settings-section">
-            <div className="settings-label">Review</div>
-            <label className="settings-option">
-              <input
-                type="checkbox"
-                checked={settings.review ?? false}
-                onChange={(e) => commit({ ...settings, review: e.target.checked })}
-              />
-              <div className="settings-option-text">
-                <div>Show the Review panel (comment on AI output, send in batches)</div>
-                <div className="settings-option-hint">Select text in a session (or 💬 a message) to comment; comments collect in batches you send to the AI when ready. Right-hand column on desktop, right drawer on mobile. Existing batches are kept while off.</div>
-              </div>
-            </label>
-          </div>
-          <div className="settings-section">
-            <div className="settings-label">Rich copy</div>
-            <label className="settings-option">
-              <input
-                type="checkbox"
-                checked={settings.richCopy ?? false}
-                onChange={(e) => commit({ ...settings, richCopy: e.target.checked })}
-              />
-              <div className="settings-option-text">
-                <div>Show 🍚 on AI replies</div>
-                <div className="settings-option-hint">One click copies the reply to the clipboard with formatting (headings, lists, code blocks), ready to paste into documents or chat apps.</div>
-              </div>
-            </label>
-          </div>
-          <div className="settings-section">
-            <div className="settings-label">Install as app</div>
-            {pwa.isInstalled ? (
-              <div className="settings-option-hint">Already installed on this device.</div>
-            ) : pwa.canInstall ? (
-              <div className="settings-account-row">
-                <div className="settings-option-text">
-                  <div>Pin AI Studio to your home screen / launcher.</div>
-                  <div className="settings-option-hint">Standalone window, no browser chrome.</div>
-                </div>
-                <button className="settings-signout" onClick={() => pwa.install()}>Install app</button>
-              </div>
-            ) : (
-              <div className="settings-option-hint">
-                Browser hasn't offered installation yet — interact with the app for a bit then reopen Settings, or use the browser menu (Chrome: ⋮ → Install / Add to Home Screen; iOS Safari: Share → Add to Home Screen).
-              </div>
-            )}
-          </div>
-          {username && (
-            <div className="settings-section">
-              <div className="settings-label">Account</div>
-              <div className="settings-account-row">
-                <div className="settings-option-text">
-                  <div>Signed in as <code className="settings-mono">{username}</code></div>
-                </div>
-                <button className="settings-signout" onClick={onSignOut}>Sign out</button>
-              </div>
-            </div>
+              )}
+              {registered}
+            </>
           )}
-          {listSettingsSections().map((section) => (
-            <div key={section.id} className="settings-section">
-              <div className="settings-label">{section.label}</div>
-              {section.render({ settings, commit })}
-            </div>
-          ))}
+
+          {group === 'claude' && (
+            <>
+              <Toggle
+                label="Claude (this device)"
+                checked={local.enableClaude}
+                onChange={(v) => { onLocalChange({ ...local, enableClaude: v }); flashSaved(); }}
+                text="Enable Claude on this device"
+                hint='Off hides "New / Resume Claude session" in the tab menu. Open Claude tabs and everything else keep working.'
+              />
+              <SettingsSelect
+                label="Default Claude model (new sessions)"
+                name="model"
+                value={settings.model ?? ''}
+                options={modelOptions}
+                showId
+                onChange={(v) => commit({ ...settings, model: v })}
+                footer={
+                  <>
+                    {modelCatalog.error && (
+                      <div className="settings-option-hint" style={{ color: 'var(--color-error, #d33)' }}>
+                        Catalog unavailable — aliases only. ({modelCatalog.error})
+                      </div>
+                    )}
+                    <div className="settings-option-hint">
+                      Mid-session switching: click the model name in the status bar.
+                      {modelCatalog.cliVersion && <> · claude CLI {modelCatalog.cliVersion}</>}
+                    </div>
+                  </>
+                }
+              />
+              <SettingsSelect
+                label="Default Claude effort (new sessions)"
+                name="effort"
+                value={settings.effort ?? ''}
+                options={EFFORT_OPTIONS}
+                onChange={(v) => commit({ ...settings, effort: v })}
+                footer={
+                  <div className="settings-option-hint">
+                    Haiku 4.5 and Opus 4.1 ignore effort. Mid-session changes restart the claude process on the same transcript.
+                  </div>
+                }
+              />
+              <SettingsSelect
+                label="Claude bridge (this device)"
+                name="claudeBridge"
+                value={local.claudeBridge}
+                options={CLAUDE_BRIDGE_OPTIONS}
+                onChange={(v) => { onLocalChange({ ...local, claudeBridge: v === 'cli' ? 'cli' : 'sdk' }); flashSaved(); }}
+              />
+              <Toggle
+                label="Wire capture (this device)"
+                checked={local.showWireMenu}
+                onChange={(v) => { onLocalChange({ ...local, showWireMenu: v }); flashSaved(); }}
+                text={'Show "⚡ New Claude session (wire capture)" in the tab menu'}
+                hint="Sessions started from that item route their API calls through the local wire proxy and record every request/response (plaintext prompts included) under the project's .aie/observations/wire/ for the observe tab."
+              />
+              {registered}
+            </>
+          )}
+
+          {group === 'devin' && (
+            <>
+              <Toggle
+                label="Devin (this device)"
+                checked={local.enableDevin}
+                onChange={(v) => { onLocalChange({ ...local, enableDevin: v }); flashSaved(); }}
+                text="Enable Devin on this device"
+                hint='Off hides "New / Resume Devin session" in the tab menu. Open Devin tabs and everything else keep working.'
+              />
+              <SettingsSelect
+                label="Default Devin model (new sessions)"
+                name="devinModel"
+                value={settings.devinModel ?? ''}
+                options={DEVIN_MODEL_OPTIONS}
+                showId
+                onChange={(v) => commit({ ...settings, devinModel: v })}
+                footer={
+                  <div className="settings-option-hint">
+                    Devin's full list (~75 models) is available mid-session via the model picker.
+                  </div>
+                }
+              />
+              <SettingsSelect
+                label="Default Devin mode (new sessions)"
+                name="devinMode"
+                value={settings.devinMode ?? ''}
+                options={DEVIN_MODE_OPTIONS}
+                onChange={(v) => commit({ ...settings, devinMode: v })}
+                footer={
+                  <div className="settings-option-hint">
+                    Applied right after the session starts. Resumed sessions keep their own mode; the status-bar Mode picker still works mid-session.
+                  </div>
+                }
+              />
+              <SettingsSelect
+                label="Devin CLI version"
+                name="devinVersion"
+                value={settings.devinVersion ?? ''}
+                options={devinVersionOptions(devinVersions, settings.devinVersion ?? '')}
+                onChange={(v) => commit({ ...settings, devinVersion: v })}
+                footer={
+                  <div className="settings-option-hint">
+                    Applies to the next Devin session you open. Installed versions are read from <code className="settings-mono">~/.local/share/devin/cli/_versions</code>.
+                  </div>
+                }
+              />
+              {registered}
+            </>
+          )}
+
+          {group === 'features' && (
+            <>
+              <Toggle
+                label="Review"
+                checked={settings.review ?? false}
+                onChange={(v) => commit({ ...settings, review: v })}
+                text="Show the Review panel (comment on AI output, send in batches)"
+                hint="Select text in a session (or 💬 a message) to comment; comments collect in batches you send to the AI when ready. Right-hand column on desktop, right drawer on mobile. Existing batches are kept while off."
+              />
+              <Toggle
+                label="Rich copy"
+                checked={settings.richCopy ?? false}
+                onChange={(v) => commit({ ...settings, richCopy: v })}
+                text="Show 🍚 on AI replies"
+                hint="One click copies the reply to the clipboard with formatting (headings, lists, code blocks), ready to paste into documents or chat apps."
+              />
+              <Toggle
+                label="Show stderr output"
+                checked={settings.showStderr ?? false}
+                onChange={(v) => commit({ ...settings, showStderr: v })}
+                text="Show stderr in chat"
+                hint="Display stderr messages from AI processes (can be noisy)"
+              />
+              {registered}
+            </>
+          )}
         </div>
       </div>
     </div>

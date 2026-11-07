@@ -56,6 +56,10 @@ export type TabRenderContext = {
   // generating / waiting on the user; null on unmount. App turns this into
   // the TabBar / GroupList markers.
   reportActivity: (activity: TabActivity | null) => void;
+  // Model: TabKindRegistry / web.CloseTab. Register on mount / null on
+  // unmount; CloseTab asks the guard first and aborts when it returns false
+  // (EditorPanel uses it to confirm discarding unsaved changes).
+  registerCloseGuard: (guard: (() => boolean) | null) => void;
 };
 
 // Kinds that opt into createAction get a "+ label" entry in the TabBar

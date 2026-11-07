@@ -23,6 +23,8 @@ export {
 export {
   registerSettingsSection,
   listSettingsSections,
+  sectionsForGroup,
+  type SettingsGroupId,
   type SettingsSection,
   type SettingsSectionProps,
 } from './settingsRegistry';

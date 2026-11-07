@@ -18,6 +18,9 @@ export const DEFAULT_GROUP_NAME = 'Default';
 // groupId: owning Group. Absent on legacy tabs = the default Group, so old
 // workspace files need no migration.
 export type FileTab = { id: string; type: 'file'; path: string; groupId?: string };
+// Model: entity Tab (type=editor) / web.EditorPanel. Writable text editor over
+// a project file; deduped per project by path, independently of file tabs.
+export type EditorTab = { id: string; type: 'editor'; path: string; groupId?: string };
 // initialPrompt: one-shot first message for a *new* session (used by other
 // tab kinds' ▶ buttons). ChatPanel sends it once the session is ready and
 // immediately strips it from the workspace, so a refresh never re-sends.
@@ -27,6 +30,12 @@ export type FileTab = { id: string; type: 'file'; path: string; groupId?: string
 // to the tab, so a resume keeps capturing.
 export type SessionTab = { id: string; type: 'session'; resumeId?: string; title?: string; initialPrompt?: string; wire?: boolean; groupId?: string };
 export type DevinTab = { id: string; type: 'devin'; resumeId?: string; title?: string; groupId?: string };
+// Model: entity Tab (type=claude-sdk) / web.SdkChatPanel. A Claude session
+// driven through the Agent SDK bridge (server ClaudeSdkSessionBridge) instead
+// of the hand-rolled stream-json one. Same jsonl sessions as `session` tabs;
+// title follows the SDK's session summary (custom title > AI title > first
+// prompt) and is updated by the server whenever it changes.
+export type ClaudeSdkTab = { id: string; type: 'claude-sdk'; resumeId?: string; title?: string; initialPrompt?: string; wire?: boolean; groupId?: string };
 // Model: entity Tab (type=observe) / web.ObserveTab. A read-only observation
 // view of one AI session: origin points at the source session (type session
 // or devin, key = resumeId). No process, no WS — closing it never touches the
@@ -39,7 +48,9 @@ export type ObserveTab = { id: string; type: 'observe'; origin: TabRef; title?: 
 // App.tsx. The union is derived automatically.
 export interface TabKindMap {
   file: FileTab;
+  editor: EditorTab;
   session: SessionTab;
+  'claude-sdk': ClaudeSdkTab;
   devin: DevinTab;
   observe: ObserveTab;
 }
@@ -51,7 +62,12 @@ export type TabRef = { type: string; key: string };
 export function tabRef(tab: Tab | null | undefined): TabRef | null {
   if (!tab) return null;
   if (tab.type === 'file') return { type: 'file', key: tab.path };
+  if (tab.type === 'editor') return { type: 'editor', key: tab.path };
   if (tab.type === 'session' || tab.type === 'devin') return tab.resumeId ? { type: tab.type, key: tab.resumeId } : null;
+  // A Claude session's identity is the session, not the bridge driving it
+  // (rule-405): comments / observe / jumps made under either Claude tab kind
+  // resolve under the other.
+  if (tab.type === 'claude-sdk') return tab.resumeId ? { type: 'session', key: tab.resumeId } : null;
   // observe tabs are identified by what they observe, so two observe tabs of
   // the same session compare equal (web.ObserveTab dedupe).
   if (tab.type === 'observe') return { type: 'observe', key: `${tab.origin.type}:${tab.origin.key}` };
@@ -101,13 +117,28 @@ export type Workspace = {
   projects: Record<string, ProjectWorkspace>;
 };
 
+// Model: server.ListSdkSessions — one row of the SDK-side session list.
+export type ResumableSdkSession = {
+  sessionId: string;
+  title: string;
+  customTitle: string | null;
+  firstPrompt: string | null;
+  lastModified: number;
+  // Which bridge holds a process for it right now (Claude Session invariant).
+  liveIn: 'cli' | 'sdk' | null;
+};
+
 export type ResumableSession = {
   uuid: string;
   mtime: number;
   size: number;
   preview: string;
+  /** SDK summary: custom title > AI title > first prompt (server.ListSessions rule-403) */
+  title?: string | null;
   /** wire-proxy records on disk for this session (server.ListSessions); 0 = none */
   wire?: number;
+  /** which bridge holds a process for it right now; null = not live */
+  live?: 'cli' | 'sdk' | null;
 };
 
 export type ResumableDevinSession = {
@@ -120,6 +151,22 @@ export type ResumableDevinSession = {
 export type SendKey = 'enter' | 'cmd-enter' | 'shift-enter';
 export type Theme = 'dark' | 'light' | 'dim';
 export type FontScale = 'small' | 'normal' | 'large' | 'xlarge' | 'huge' | 'xhuge';
+// Device-local preferences (model: web entity Settings — claudeBridge /
+// showWireMenu). Kept in localStorage, never sent to the server.
+export type ClaudeBridge = 'sdk' | 'cli';
+export type LocalPrefs = {
+  // Which Claude tab kind the ⋮ menu's New / Resume items open: 'sdk' =
+  // claude-sdk (Agent SDK bridge, default), 'cli' = session (classic bridge).
+  claudeBridge: ClaudeBridge;
+  // Show the "⚡ New Claude session (wire capture)" item. Default off.
+  showWireMenu: boolean;
+  // Model: web entity Settings.enableClaude / enableDevin. Default on. Off
+  // hides only that provider's New / Resume items in the ⋮ menu — open tabs,
+  // pickers and every other feature are untouched.
+  enableClaude: boolean;
+  enableDevin: boolean;
+};
+
 export type Settings = {
   sendKey: SendKey;
   theme: Theme;

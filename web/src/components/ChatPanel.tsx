@@ -868,9 +868,19 @@ export function ChatPanel({
       if (m.model) setModel(m.model);
       else if (m.requestedModel) setModel((cur) => cur ?? m.requestedModel);
       if (typeof m.effort === 'string') setEffort(m.effort);
+      if (typeof m.title === 'string' && m.title && onTitle) { onTitle(m.title); titleSetFromMsg.current = true; }
       setWireOn(m.wire === true);
       if (m.cliCatalog && typeof m.cliCatalog === 'object') setCliCatalog(m.cliCatalog);
       showToast(m.resumed ? 'Resumed session' : 'Session started');
+      return;
+    }
+    if (m.type === 'title') {
+      // rule-366: the server's title (AI title / rename from the jsonl)
+      // overrides whatever the first prompt set, every time it changes.
+      if (typeof m.title === 'string' && m.title && onTitle) {
+        onTitle(m.title);
+        titleSetFromMsg.current = true;
+      }
       return;
     }
     if (m.type === 'effort') {

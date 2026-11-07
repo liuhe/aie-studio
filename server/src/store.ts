@@ -19,6 +19,7 @@ export type Project = {
 export type Tab =
   | { id: string; type: 'file'; path: string; groupId?: string }
   | { id: string; type: 'session'; resumeId?: string; title?: string; groupId?: string }
+  | { id: string; type: 'claude-sdk'; resumeId?: string; title?: string; groupId?: string }
   | { id: string; type: 'devin'; resumeId?: string; title?: string; groupId?: string };
 
 // User-created tab group (cmux-style workspace inside a project). The default

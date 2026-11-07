@@ -12,8 +12,6 @@ export function ProjectPicker({
   onOpenSettings,
   onOpenDevinUsage,
   onOpenDebug,
-  downloadMode,
-  onToggleDownloadMode,
   sidebarView,
   onToggleSidebarView,
 }: {
@@ -24,8 +22,6 @@ export function ProjectPicker({
   onOpenSettings?: () => void;
   onOpenDevinUsage?: () => void;
   onOpenDebug?: () => void;
-  downloadMode?: boolean;
-  onToggleDownloadMode?: () => void;
   sidebarView?: 'files' | 'groups';
   onToggleSidebarView?: () => void;
 }) {
@@ -78,18 +74,7 @@ export function ProjectPicker({
               onClick={() => { setOpen(false); onToggleSidebarView(); }}
             >{sidebarView === 'groups' ? '📁 Show files' : '🗂 Show groups'}</div>
           )}
-          {onToggleDownloadMode && (
-            <div
-              className="picker-toggle"
-              role="menuitemcheckbox"
-              aria-checked={!!downloadMode}
-              onClick={onToggleDownloadMode}
-            >
-              <span className="picker-toggle-box">{downloadMode ? '☑' : '☐'}</span>
-              <span>Click file to download</span>
-            </div>
-          )}
-          {(onToggleSidebarView || onToggleDownloadMode) && <div className="picker-divider" />}
+          {onToggleSidebarView && <div className="picker-divider" />}
           {onOpenDevinUsage && (
             <div
               className="picker-add-action"

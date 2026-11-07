@@ -1,4 +1,4 @@
-import type { Project, Workspace, ProjectWorkspace, ResumableSession, ResumableDevinSession, Settings } from './types';
+import type { Project, Workspace, ProjectWorkspace, ResumableSession, ResumableSdkSession, ResumableDevinSession, Settings } from './types';
 import type { ObservationResponse, WireRecord } from './lib/observe';
 
 export type AuthStatus = {
@@ -25,6 +25,104 @@ export async function login(username: string, password: string): Promise<boolean
 
 export async function logout(): Promise<void> {
   await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+}
+
+// Model: server.ListDir (auc-072).
+export type FsEntry = { name: string; path: string; isDir: boolean; mime?: string };
+export async function listDir(projectId: string, path: string): Promise<FsEntry[]> {
+  const r = await fetch(
+    `/api/fs/list?project=${encodeURIComponent(projectId)}&path=${encodeURIComponent(path)}`,
+  );
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new Error(j.error || `HTTP ${r.status}`);
+  }
+  const j = await r.json();
+  return j.items ?? [];
+}
+
+// Model: web.FileTree rule-411 / rule-412 → server.MoveEntry (auc-126).
+// Rename and move share this: a rename is a move within the same parent.
+export async function moveEntry(
+  projectId: string,
+  from: string,
+  to: string,
+): Promise<{ from: string; to: string }> {
+  const r = await fetch('/api/fs/move', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project: projectId, from, to }),
+  });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new Error(j.error || `HTTP ${r.status}`);
+  }
+  return r.json();
+}
+
+// Model: server.StatFile (auc-074).
+export type FsStat = { path: string; size: number; isDir: boolean; mime: string; mtimeMs: number };
+export async function statFile(projectId: string, path: string): Promise<FsStat> {
+  const r = await fetch(
+    `/api/fs/stat?project=${encodeURIComponent(projectId)}&path=${encodeURIComponent(path)}`,
+  );
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new ApiError(r.status, j.error || `HTTP ${r.status}`);
+  }
+  return r.json();
+}
+
+// Model: server.ReadFile (auc-073) — text body.
+export async function readFileText(projectId: string, path: string): Promise<string> {
+  const r = await fetch(
+    `/api/fs/file?project=${encodeURIComponent(projectId)}&path=${encodeURIComponent(path)}`,
+  );
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new ApiError(r.status, j.error || `HTTP ${r.status}`);
+  }
+  return r.text();
+}
+
+export class ApiError extends Error {
+  constructor(public status: number, message: string, public body?: unknown) {
+    super(message);
+  }
+}
+
+// Model: web.EditorPanel → server.WriteFile (auc-128). Pass baseMtimeMs to
+// get a 409 when the file changed underneath; omit it to overwrite.
+export async function writeFile(
+  projectId: string,
+  path: string,
+  content: string,
+  baseMtimeMs?: number,
+): Promise<{ path: string; size: number; mtimeMs: number }> {
+  const r = await fetch('/api/fs/file', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project: projectId, path, content, baseMtimeMs }),
+  });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new ApiError(r.status, j.error || `HTTP ${r.status}`, j);
+  }
+  return r.json();
+}
+
+// Model: web.FileTree rule-412 → server.MakeDir (auc-127).
+export async function makeDir(projectId: string, path: string): Promise<{ path: string }> {
+  const r = await fetch('/api/fs/mkdir', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project: projectId, path }),
+  });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new Error(j.error || `HTTP ${r.status}`);
+  }
+  return r.json();
 }
 
 export async function listProjects(): Promise<Project[]> {
@@ -104,6 +202,27 @@ export async function listResumableSessions(projectId: string): Promise<Resumabl
   const r = await fetch(`/api/projects/${projectId}/sessions`);
   const j = await r.json();
   return j.sessions ?? [];
+}
+
+// Model: server.ListSdkSessions / web.SdkSessionPicker.
+export async function listSdkSessions(projectId: string): Promise<ResumableSdkSession[]> {
+  const r = await fetch(`/api/projects/${projectId}/sdk-sessions`);
+  if (!r.ok) return [];
+  const data = await r.json();
+  return Array.isArray(data?.sessions) ? data.sessions : [];
+}
+
+// Model: server.RenameSession / web.RenameSdkSession.
+export async function renameSdkSession(projectId: string, sessionId: string, title: string): Promise<void> {
+  const r = await fetch(`/api/projects/${projectId}/sdk-sessions/${sessionId}/rename`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body?.error ?? `HTTP ${r.status}`);
+  }
 }
 
 export async function listDevinSessions(projectId: string): Promise<ResumableDevinSession[]> {

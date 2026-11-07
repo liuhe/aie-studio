@@ -1,8 +1,10 @@
 import { Viewer } from '../components/Viewer';
+import { EditorPanel } from '../components/EditorPanel';
 import { ChatPanel } from '../components/ChatPanel';
 import { DevinPanel } from '../components/DevinPanel';
+import { SdkPanel } from '../components/SdkPanel';
 import { ObservePanel } from '../components/ObservePanel';
-import type { Tab, DevinTab, SessionTab, FileTab, ObserveTab } from '../types';
+import type { Tab, DevinTab, SessionTab, FileTab, EditorTab, ObserveTab, ClaudeSdkTab } from '../types';
 import { registerTabKind } from './tabRegistry';
 
 function shortId() { return Math.random().toString(36).slice(2, 10); }
@@ -14,12 +16,20 @@ function asFile(tab: Tab): FileTab {
   if (tab.type !== 'file') throw new Error(`tabRegistry: expected file tab, got ${tab.type}`);
   return tab;
 }
+function asEditor(tab: Tab): EditorTab {
+  if (tab.type !== 'editor') throw new Error(`tabRegistry: expected editor tab, got ${tab.type}`);
+  return tab;
+}
 function asSession(tab: Tab): SessionTab {
   if (tab.type !== 'session') throw new Error(`tabRegistry: expected session tab, got ${tab.type}`);
   return tab;
 }
 function asDevin(tab: Tab): DevinTab {
   if (tab.type !== 'devin') throw new Error(`tabRegistry: expected devin tab, got ${tab.type}`);
+  return tab;
+}
+function asClaudeSdk(tab: Tab): ClaudeSdkTab {
+  if (tab.type !== 'claude-sdk') throw new Error(`tabRegistry: expected claude-sdk tab, got ${tab.type}`);
   return tab;
 }
 function asObserve(tab: Tab): ObserveTab {
@@ -33,6 +43,16 @@ registerTabKind({
   render: ({ tab, project, settings }) => {
     const t = asFile(tab);
     return <Viewer projectId={project.id} file={{ path: t.path }} theme={settings.theme} />;
+  },
+});
+
+// Model: web.EditorPanel — writable counterpart of the file kind.
+registerTabKind({
+  id: 'editor',
+  label: 'Editor',
+  render: ({ tab, project, registerCloseGuard }) => {
+    const t = asEditor(tab);
+    return <EditorPanel projectId={project.id} path={t.path} registerCloseGuard={registerCloseGuard} />;
   },
 });
 
@@ -76,6 +96,54 @@ registerTabKind({
           );
         }}
         onExportApi={registerExportApi}
+        onOpenFile={(relPath) => openTab({ id: shortId(), type: 'file', path: relPath })}
+      />
+    );
+  },
+});
+
+// Model: web.SdkChatPanel — Claude through the Agent SDK bridge. A separate
+// kind on purpose: the `session` kind and ChatPanel stay untouched.
+registerTabKind({
+  id: 'claude-sdk',
+  label: 'Claude (SDK)',
+  render: ({ tab, project, settings, updateTabs, registerExportApi, openTab, addComment, commentMarks, focusComment, markBatchSent, registerPanelApi, reportActivity }) => {
+    const t = asClaudeSdk(tab);
+    return (
+      <SdkPanel
+        projectId={project.id}
+        projectPath={project.path}
+        resumeId={t.resumeId}
+        wire={t.wire}
+        initialPrompt={t.initialPrompt}
+        sendKey={settings.sendKey}
+        theme={settings.theme}
+        showStderr={settings.showStderr}
+        richCopy={settings.richCopy}
+        onComment={settings.review ? addComment : undefined}
+        commentMarks={commentMarks}
+        onBatchSent={markBatchSent}
+        onFocusComment={focusComment}
+        onPanelApi={registerPanelApi}
+        onExportApi={registerExportApi}
+        onInitialPromptConsumed={() => {
+          updateTabs((tabs) =>
+            tabs.map((x) => {
+              if (x.id !== t.id || x.type !== 'claude-sdk' || x.initialPrompt == null) return x;
+              const { initialPrompt: _consumed, ...rest } = x;
+              return rest;
+            }),
+          );
+        }}
+        onActivity={reportActivity}
+        onTitle={(title) => updateTabs((tabs) => tabs.map((x) => (x.id === t.id ? { ...x, title } : x)))}
+        onSessionId={(uuid) => {
+          updateTabs((tabs) => {
+            const cur = tabs.find((x) => x.id === t.id);
+            if (cur?.type === 'claude-sdk' && cur.resumeId === uuid) return tabs;
+            return tabs.map((x) => (x.id === t.id && x.type === 'claude-sdk' ? { ...x, resumeId: uuid } : x));
+          });
+        }}
         onOpenFile={(relPath) => openTab({ id: shortId(), type: 'file', path: relPath })}
       />
     );

@@ -10,6 +10,8 @@ import { getProject, getSettings } from './store.js';
 import { getUserId } from './auth.js';
 import { registerWireSession, wireBaseUrl } from './observe/wire-proxy.js';
 import { isEffortLevel } from './models.js';
+import { markLive, unmarkLive, liveBridge } from './live-sessions.js';
+import { getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 
 export type CliCatalog = {
   slashCommands: string[];
@@ -103,6 +105,9 @@ type SessionEntry = {
   // refresh) would never see it — replayed in `started`. Feeds the "/"
   // command picker.
   cliCatalog: CliCatalog | null;
+  // Last title broadcast (rule-402): SDK summary = custom-title > ai-title > first prompt.
+  title: string | null;
+  titleTimers: NodeJS.Timeout[];
   watcher?: nodeFs.FSWatcher;
   externalTimer?: NodeJS.Timeout;
   // When the last client disconnects, we delay killing the subprocess so a
@@ -202,7 +207,11 @@ const pending = new Set<SessionEntry>();
 // (-p) mode claude gates checkpointing on the CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING
 // env var — the userSettings flag and --settings JSON only apply to the
 // interactive TUI path, not to us.
-const CLAUDE_ENV = { ...process.env, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1' };
+// CLAUDE_CODE_ENTRYPOINT=sdk-ts (rule-402): since 2.1.277 a bare `claude -p`
+// skips the background auto-title request; presenting as an SDK entrypoint
+// gets the same CLI to write ai-title records. Undocumented; if a future CLI
+// stops honouring it we just lose AI titles again.
+const CLAUDE_ENV = { ...process.env, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: '1', CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' };
 
 // observeWire (model: server.ObserveWireSession): route this process's API
 // calls through the built-in wire proxy. Only honoured while the proxy is up;
@@ -250,7 +259,7 @@ function scheduleKillIfIdle(entry: SessionEntry) {
     if (entry.clients.size > 0) return;
     if (entry.thinking) return; // result handler will rearm when done
     try { entry.proc.kill('SIGTERM'); } catch {}
-    if (entry.resumeId) byResumeId.delete(entry.resumeId);
+    if (entry.resumeId) { byResumeId.delete(entry.resumeId); unmarkLive(entry.resumeId, 'cli'); }
     pending.delete(entry);
   }, CLIENT_DRAIN_GRACE_MS);
 }
@@ -515,6 +524,25 @@ function startWatcher(entry: SessionEntry) {
   }
 }
 
+// Model: server.ClaudeSessionBridge rule-402 — the AI title lands a few
+// seconds after the first result; re-check twice, broadcast on change.
+function scheduleTitleRefresh(entry: SessionEntry) {
+  for (const t of entry.titleTimers) clearTimeout(t);
+  entry.titleTimers = [2500, 8000].map((ms) => setTimeout(() => void refreshTitle(entry), ms));
+}
+
+async function refreshTitle(entry: SessionEntry) {
+  if (!entry.resumeId) return;
+  try {
+    const info = await getSessionInfo(entry.resumeId, { dir: entry.cwd });
+    const t = info?.summary?.trim();
+    if (t && t !== entry.title) {
+      entry.title = t;
+      broadcast(entry, { type: 'title', title: t });
+    }
+  } catch {}
+}
+
 function wireProcess(entry: SessionEntry) {
   const rl = readline.createInterface({ input: entry.proc.stdout });
   rl.on('line', (line) => {
@@ -532,6 +560,7 @@ function wireProcess(entry: SessionEntry) {
     }
     if (event?.type === 'result') {
       entry.thinking = false;
+      scheduleTitleRefresh(entry);
       // Task finished. If nobody's listening, start the kill timer now.
       if (entry.clients.size === 0) scheduleKillIfIdle(entry);
     }
@@ -555,10 +584,12 @@ function wireProcess(entry: SessionEntry) {
       const sid: string = event.session_id;
       if (entry.resumeId && entry.resumeId !== sid) {
         byResumeId.delete(entry.resumeId);
+        unmarkLive(entry.resumeId, 'cli');
         if (entry.watcher) { try { entry.watcher.close(); } catch {} entry.watcher = undefined; }
       }
       entry.resumeId = sid;
       byResumeId.set(sid, entry);
+      markLive(sid, 'cli');
       pending.delete(entry);
       startWatcher(entry);
       // First prompt of a fresh session was registered before the file was
@@ -575,9 +606,10 @@ function wireProcess(entry: SessionEntry) {
 
   entry.proc.on('exit', (code) => {
     broadcast(entry, { type: 'exit', code });
+    for (const t of entry.titleTimers) clearTimeout(t);
     clearPendingToolRequests(entry);
     entry.pendingUuids = [];
-    if (entry.resumeId) byResumeId.delete(entry.resumeId);
+    if (entry.resumeId) { byResumeId.delete(entry.resumeId); unmarkLive(entry.resumeId, 'cli'); }
     pending.delete(entry);
     if (entry.watcher) { try { entry.watcher.close(); } catch {} }
     if (entry.externalTimer) clearTimeout(entry.externalTimer);
@@ -808,9 +840,19 @@ export function registerSessionRoutes(app: FastifyInstance) {
           model: entry.model,
           effort: entry.effort,
           wire: entry.observeWire,
+          title: entry.title,
           cliCatalog: catalogFor(entry),
         });
         replayPendingToolRequests(entry, socket);
+        return;
+      }
+
+      // Claude Session invariant (rule-393): a session the SDK bridge is
+      // driving must not get a second process from here.
+      if (resumeId && liveBridge(resumeId) === 'sdk') {
+        send(socket, { type: 'error', message: 'This session is open in a Claude (SDK) tab — use that tab, or close it first.' });
+        send(socket, { type: 'exit', code: 'open-elsewhere' });
+        try { socket.close(); } catch {}
         return;
       }
 
@@ -837,12 +879,14 @@ export function registerSessionRoutes(app: FastifyInstance) {
         effort,
         observeWire,
         cliCatalog: null,
+        title: null,
+        titleTimers: [],
         pendingToolRequests: new Map(),
         pendingUuids: [],
       };
       // Pre-register so a near-simultaneous second connection with the same
       // resumeId attaches instead of spawning a duplicate.
-      if (resumeId) byResumeId.set(resumeId, entry);
+      if (resumeId) { byResumeId.set(resumeId, entry); markLive(resumeId, 'cli'); }
       else pending.add(entry);
 
       wireProcess(entry);
