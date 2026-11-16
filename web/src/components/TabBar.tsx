@@ -78,6 +78,7 @@ export function TabBar({
   onReviewClick,
   reviewCount,
   onRefresh,
+  onResetSession,
   onExport,
   canExport,
   activeProjectName,
@@ -118,6 +119,10 @@ export function TabBar({
   // Draft comments waiting to be sent — shown as a badge on 💬.
   reviewCount?: number;
   onRefresh?: () => void;
+  // Model: web.ResetSessionTab — kill the server-side process of the active
+  // session / claude-sdk / devin tab and reopen it from the transcript.
+  // Enabled once the tab has a resumeId.
+  onResetSession?: (tab: Tab) => void;
   onExport?: () => void;
   canExport?: boolean;
   activeProjectName?: string | null;
@@ -246,6 +251,18 @@ export function TabBar({
                 onClick={() => { setOpen(false); onRefresh(); }}
               >↻ Refresh tab</button>
             )}
+            {onResetSession && activeForMenu && observableKind(activeForMenu) && (
+              <button
+                className="overflow-action"
+                disabled={!activeForMenu.resumeId}
+                title={
+                  activeForMenu.resumeId
+                    ? 'Kill the server-side process of this session and reopen it from the saved transcript. Use when the session is stuck. (Refresh tab only reconnects to the running process.)'
+                    : 'The session has not started yet'
+                }
+                onClick={() => { setOpen(false); onResetSession(activeForMenu); }}
+              >⟳ Reset session</button>
+            )}
             {onExport && activeTabId && (
               <button
                 className="overflow-action"
@@ -279,7 +296,7 @@ export function TabBar({
                 onClick={() => setSubmenu('move')}
               >→ Move tab to …<span className="overflow-chevron">›</span></button>
             )}
-            {activeTabId && ((onRefresh || onExport || observable || (onRenameSdkSession && activeForMenu?.type === 'claude-sdk')) || (onMoveTab && (moveTargets ?? []).length > 0)) && (
+            {activeTabId && ((onRefresh || onResetSession || onExport || observable || (onRenameSdkSession && activeForMenu?.type === 'claude-sdk')) || (onMoveTab && (moveTargets ?? []).length > 0)) && (
               <div className="overflow-divider" />
             )}
             {onNewSession && (

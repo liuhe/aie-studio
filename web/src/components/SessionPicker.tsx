@@ -5,7 +5,8 @@ export type PickerItem = {
   primary: string;
   secondary?: string;
   timestamp?: number; // ms since epoch
-  badge?: string; // e.g. "⚡ 15 wire": the session has wire-proxy records (server.ListSessions)
+  badge?: string; // e.g. "● live · SDK tab" or "⚡ 15 wire" (server.ListSessions / ListDevinSessions)
+  badgeTitle?: string; // tooltip explaining the badge
 };
 
 // Generic resume-session picker. Replaces the native prompt() flow which was
@@ -63,7 +64,7 @@ export function SessionPicker({
               <div className="session-picker-item-primary">{it.primary}</div>
               {(it.secondary || it.timestamp || it.badge) && (
                 <div className="session-picker-item-meta">
-                  {it.badge && <span className="session-picker-item-badge" title="This session has wire-proxy records: open it and use ⋮ → Observe this session to see them">{it.badge}</span>}
+                  {it.badge && <span className="session-picker-item-badge" title={it.badgeTitle}>{it.badge}</span>}
                   {it.secondary && <span className="session-picker-item-secondary">{it.secondary}</span>}
                   {it.timestamp && <span className="session-picker-item-stamp">{fmt(it.timestamp)}</span>}
                 </div>

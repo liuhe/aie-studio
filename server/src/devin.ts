@@ -37,6 +37,10 @@ type DevinSessionEntry = {
   // Auto-incrementing JSON-RPC id pool for client→agent messages we generate
   // on behalf of websocket clients.
   rpcSeq: number;
+  // Set by ResetDevinSession (rule-471) just before SIGTERM: the exit handler
+  // then reports code 'reset' so clients can tell a deliberate reset from a
+  // crash.
+  resetting?: boolean;
   // Number of session/prompt RPCs in flight (model: Devin Session
   // .inflightPrompts, server rule-314). +1 per prompt written, −1 per response
   // carrying a stopReason. >0 = a turn is running (session.ts.thinking
@@ -684,8 +688,10 @@ function wireProcess(entry: DevinSessionEntry, onInit: (sessionIdNow: string | n
 
   entry.proc.on('exit', (code) => {
     persistSessionConfig(entry);
-    broadcast(entry, { type: 'exit', code });
-    if (entry.sessionId) bySessionId.delete(entry.sessionId);
+    broadcast(entry, { type: 'exit', code: entry.resetting ? 'reset' : code });
+    // rule-471: only drop the registration if it is still ours — a reset
+    // client may already have respawned this slug into a new entry.
+    if (entry.sessionId && bySessionId.get(entry.sessionId) === entry) bySessionId.delete(entry.sessionId);
     pending.delete(entry);
     if (entry.killTimer) { clearTimeout(entry.killTimer); entry.killTimer = undefined; }
     for (const { timer } of entry.pendingAgentRpcs.values()) if (timer) clearTimeout(timer);
@@ -701,6 +707,38 @@ function wireProcess(entry: DevinSessionEntry, onInit: (sessionIdNow: string | n
   entry.proc.on('error', (err) => {
     broadcast(entry, { type: 'error', message: String(err) });
   });
+}
+
+// Wait for the devin child to exit after SIGTERM; SIGKILL if it lingers.
+function awaitProcExit(proc: ChildProcessWithoutNullStreams, timeoutMs = 3000): Promise<void> {
+  return new Promise((resolve) => {
+    if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
+    const onExit = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(() => {
+      proc.off('exit', onExit);
+      try { proc.kill('SIGKILL'); } catch {}
+      resolve();
+    }, timeoutMs);
+    proc.once('exit', onExit);
+  });
+}
+
+// Model: server.ResetDevinSession (auc-138, rule-470). Unregister first so a
+// reconnect with the same slug spawns fresh instead of attaching to the dying
+// process, persist model/mode for the restore on session/load, then SIGTERM
+// and wait for the exit (the exit handler broadcasts exit{code:'reset'} and
+// closes the WS clients). Allowed while a prompt is in flight — that is the
+// stuck-session case.
+async function resetEntry(entry: DevinSessionEntry): Promise<void> {
+  entry.resetting = true;
+  persistSessionConfig(entry);
+  if (entry.sessionId && bySessionId.get(entry.sessionId) === entry) bySessionId.delete(entry.sessionId);
+  pending.delete(entry);
+  if (entry.killTimer) { clearTimeout(entry.killTimer); entry.killTimer = undefined; }
+  for (const { timer } of entry.pendingAgentRpcs.values()) if (timer) clearTimeout(timer);
+  entry.pendingAgentRpcs.clear();
+  try { entry.proc.kill('SIGTERM'); } catch {}
+  await awaitProcExit(entry.proc);
 }
 
 // After session/load, check if we have saved config from a previous
@@ -786,6 +824,7 @@ function readSessionsFromDb(cwd: string): Array<{
   cwd: string;
   title?: string;
   updatedAt?: string;
+  live: boolean;
 }> | null {
   const dbPath = devinDbPath();
   if (!nodeFs.existsSync(dbPath)) return null;
@@ -805,6 +844,8 @@ function readSessionsFromDb(cwd: string): Array<{
       // in; surfacing it just clutters the picker.
       title: r.title && r.title !== 'Untitled' ? r.title : undefined,
       updatedAt: new Date(r.last_activity_at * 1000).toISOString(),
+      // Model: ListDevinSessions rule-477 — this server holds a process for it.
+      live: bySessionId.has(r.id),
     }));
   } catch {
     return null;
@@ -1072,7 +1113,8 @@ export function registerDevinRoutes(app: FastifyInstance) {
       try {
         const bin = await resolveDevinBinForUser(uid, (m) => app.log.warn(m));
         const result = await oneShotRpc(bin, project.path, 'session/list', { cwd: project.path });
-        return { sessions: result?.sessions ?? [] };
+        const sessions: any[] = Array.isArray(result?.sessions) ? result.sessions : [];
+        return { sessions: sessions.map((s) => ({ ...s, live: typeof s?.sessionId === 'string' && bySessionId.has(s.sessionId) })) };
       } catch (e: any) {
         return { sessions: [], error: String(e?.message ?? e) };
       }
@@ -1092,6 +1134,23 @@ export function registerDevinRoutes(app: FastifyInstance) {
       const row = readSessionFromDb(req.params.slug, project.path);
       if (!row) return reply.code(404).send({ error: 'session not found' });
       return row;
+    },
+  );
+
+  // Model: server.ResetDevinSession — kill the acp process for this session
+  // and forget it; the client then reconnects with session/load.
+  app.post<{ Params: { id: string; slug: string } }>(
+    '/api/projects/:id/devin-sessions/:slug/reset',
+    async (req, reply) => {
+      const uid = getUserId(req);
+      if (!uid) return reply.code(401).send({ error: 'unauthorized' });
+      const project = await getProject(uid, req.params.id);
+      if (!project) return reply.code(404).send({ error: 'project not found' });
+      const entry = bySessionId.get(req.params.slug);
+      if (!entry) return { ok: true, live: false };
+      app.log.info({ slug: req.params.slug, clients: entry.clients.size, inflight: entry.inflightPrompts }, 'devin: reset');
+      await resetEntry(entry);
+      return { ok: true, live: true };
     },
   );
 

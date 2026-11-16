@@ -268,6 +268,23 @@ export async function renameSdkSession(projectId: string, sessionId: string, tit
   }
 }
 
+// Model: web.ResetSessionTab → server.ResetSession / ResetSdkSession /
+// ResetDevinSession. Resolves once the server has torn the live process down
+// (live:false = nothing was running; the caller remounts either way).
+export async function resetSession(
+  projectId: string,
+  kind: 'session' | 'claude-sdk' | 'devin',
+  sessionId: string,
+): Promise<{ ok: true; live: boolean }> {
+  const seg = kind === 'session' ? 'sessions' : kind === 'claude-sdk' ? 'sdk-sessions' : 'devin-sessions';
+  const r = await fetch(`/api/projects/${projectId}/${seg}/${encodeURIComponent(sessionId)}/reset`, { method: 'POST' });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body?.error ?? `HTTP ${r.status}`);
+  }
+  return r.json();
+}
+
 export async function listDevinSessions(projectId: string): Promise<ResumableDevinSession[]> {
   const r = await fetch(`/api/projects/${projectId}/devin-sessions`);
   const j = await r.json();

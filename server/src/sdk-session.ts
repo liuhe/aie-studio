@@ -351,6 +351,16 @@ function destroy(entry: SdkEntry) {
   teardown(entry);
 }
 
+// Model: server.ResetSdkSession (auc-137, rule-472). Tell every client the
+// session is going away on purpose, then destroy: generation++ silences the
+// old pump, q.close() kills the claude child, teardown drops byId / live
+// registration and closes the sockets. The SDK gives us no child handle, so
+// we cannot wait for the actual exit (same trade-off as replaceQuery).
+function resetEntry(entry: SdkEntry) {
+  broadcast(entry, { type: 'exit', code: 'reset' });
+  destroy(entry);
+}
+
 function userMessage(uuid: string, text: string, images: Array<{ mediaType?: string; data?: string }> | undefined): SDKUserMessage {
   const content: any[] = [];
   if (text) content.push({ type: 'text', text });
@@ -664,6 +674,23 @@ export function registerSdkSessionRoutes(app: FastifyInstance) {
       const startIndex = Math.max(0, endIndex - limit);
       const events = msgs.slice(startIndex, endIndex).map((m) => ({ type: m.type, uuid: m.uuid, message: m.message }));
       return { events, startIndex, endIndex, total };
+    },
+  );
+
+  // Model: server.ResetSdkSession — kill the sdk-bridge query for this
+  // session and forget it; the client then resumes from the jsonl.
+  app.post<{ Params: { id: string; sid: string } }>(
+    '/api/projects/:id/sdk-sessions/:sid/reset',
+    async (req, reply) => {
+      const uid = getUserId(req);
+      if (!uid) return reply.code(401).send({ error: 'unauthorized' });
+      const project = await getProject(uid, req.params.id);
+      if (!project) return reply.code(404).send({ error: 'project not found' });
+      const entry = byId.get(req.params.sid);
+      if (!entry) return { ok: true, live: false };
+      app.log.info({ sid: req.params.sid, clients: entry.clients.size, thinking: entry.thinking }, 'sdk-session: reset');
+      resetEntry(entry);
+      return { ok: true, live: true };
     },
   );
 

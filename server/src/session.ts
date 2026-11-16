@@ -125,6 +125,9 @@ type SessionEntry = {
   pendingUuids: PendingUuid[];
   uuidResolveRunning?: boolean;
   uuidResolveAgain?: boolean;
+  // Set by ResetSession (rule-468) just before SIGTERM: the exit handler then
+  // reports code 'reset' so clients can tell a deliberate reset from a crash.
+  resetting?: boolean;
 };
 
 type PendingToolRequest = { event: any; timer: NodeJS.Timeout | null };
@@ -605,11 +608,16 @@ function wireProcess(entry: SessionEntry) {
   });
 
   entry.proc.on('exit', (code) => {
-    broadcast(entry, { type: 'exit', code });
+    broadcast(entry, { type: 'exit', code: entry.resetting ? 'reset' : code });
     for (const t of entry.titleTimers) clearTimeout(t);
     clearPendingToolRequests(entry);
     entry.pendingUuids = [];
-    if (entry.resumeId) { byResumeId.delete(entry.resumeId); unmarkLive(entry.resumeId, 'cli'); }
+    // rule-468: only drop the registration if it is still ours — a reset
+    // client may already have respawned this sessionId into a new entry.
+    if (entry.resumeId && byResumeId.get(entry.resumeId) === entry) {
+      byResumeId.delete(entry.resumeId);
+      unmarkLive(entry.resumeId, 'cli');
+    }
     pending.delete(entry);
     if (entry.watcher) { try { entry.watcher.close(); } catch {} }
     if (entry.externalTimer) clearTimeout(entry.externalTimer);
@@ -796,6 +804,28 @@ async function resolvePendingUuids(entry: SessionEntry): Promise<void> {
   }
 }
 
+// Model: server.ResetSession (auc-136, rule-467). Tear the live entry down
+// hard: unregister first so a reconnect with the same resumeId spawns fresh
+// instead of attaching to the dying process, then SIGTERM and wait for the
+// exit (the exit handler broadcasts exit{code:'reset'} and closes the WS
+// clients). Allowed while thinking — that is the stuck-session case.
+async function resetEntry(entry: SessionEntry): Promise<void> {
+  entry.resetting = true;
+  if (entry.resumeId && byResumeId.get(entry.resumeId) === entry) {
+    byResumeId.delete(entry.resumeId);
+    unmarkLive(entry.resumeId, 'cli');
+  }
+  pending.delete(entry);
+  if (entry.watcher) { try { entry.watcher.close(); } catch {} entry.watcher = undefined; }
+  if (entry.externalTimer) { clearTimeout(entry.externalTimer); entry.externalTimer = undefined; }
+  if (entry.killTimer) { clearTimeout(entry.killTimer); entry.killTimer = undefined; }
+  for (const t of entry.titleTimers) clearTimeout(t);
+  clearPendingToolRequests(entry);
+  entry.pendingUuids = [];
+  try { entry.proc.kill('SIGTERM'); } catch {}
+  await awaitProcExit(entry.proc);
+}
+
 function buildUserEvent(text: string, images: Array<{ mediaType?: string; data?: string }> | undefined) {
   const content: any[] = [];
   if (text) content.push({ type: 'text', text });
@@ -906,6 +936,23 @@ export function registerSessionRoutes(app: FastifyInstance) {
         requestedModel,
         cliCatalog: catalogFor(entry),
       });
+    },
+  );
+
+  // Model: server.ResetSession — kill the cli-bridge process for this
+  // session and forget it; the client then resumes from the jsonl.
+  app.post<{ Params: { id: string; sid: string } }>(
+    '/api/projects/:id/sessions/:sid/reset',
+    async (req, reply) => {
+      const uid = getUserId(req);
+      if (!uid) return reply.code(401).send({ error: 'unauthorized' });
+      const project = await getProject(uid, req.params.id);
+      if (!project) return reply.code(404).send({ error: 'project not found' });
+      const entry = byResumeId.get(req.params.sid);
+      if (!entry) return { ok: true, live: false };
+      app.log.info({ sid: req.params.sid, clients: entry.clients.size, thinking: entry.thinking }, 'session: reset');
+      await resetEntry(entry);
+      return { ok: true, live: true };
     },
   );
 

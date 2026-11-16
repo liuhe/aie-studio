@@ -637,7 +637,7 @@ export function SdkPanel({
     }
     if (m.type === 'exit') {
       sessionExitedRef.current = true;
-      append({ id: shortId(), role: 'system', text: m.code === 'open-elsewhere' ? 'This session is open in another tab — closed here.' : 'session exited' });
+      append({ id: shortId(), role: 'system', text: m.code === 'open-elsewhere' ? 'This session is open in another tab — closed here.' : m.code === 'reset' ? 'Session was reset from another tab — ↻ Refresh tab to reconnect.' : 'session exited' });
       setStatus('closed');
       forms.clear();
       return;

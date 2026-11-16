@@ -30,6 +30,7 @@ import {
   listDevinSessions,
   listSdkSessions,
   renameSdkSession,
+  resetSession,
   getSettings,
   putSettings,
   getAuthStatus,
@@ -974,6 +975,22 @@ export default function App() {
     }
   }
 
+  // Model: web.ResetSessionTab (rule-462~464). Ask the server to kill the
+  // session's process and forget it, then remount the panel: its mount path
+  // refetches the transcript and reconnects with resume=, which spawns a
+  // fresh process. Unlike ↻ Refresh tab, which reattaches to the old one.
+  async function resetSessionTab(tab: Tab) {
+    if ((tab.type !== 'session' && tab.type !== 'claude-sdk' && tab.type !== 'devin') || !tab.resumeId || !activeProjectId) return;
+    if (tabActivity[tab.id]?.generating && !confirm('This session is still generating. Reset anyway? The in-progress reply will be lost.')) return;
+    try {
+      await resetSession(activeProjectId, tab.type, tab.resumeId);
+    } catch (e: any) {
+      alert(`Reset failed: ${e?.message ?? e}`);
+      return;
+    }
+    setRefreshKey((r) => ({ ...r, [tab.id]: (r[tab.id] ?? 0) + 1 }));
+  }
+
   // Resume (rule-078 / rule-378): a session whose process is still live in
   // some bridge opens as that bridge's tab kind so we attach instead of being
   // refused; otherwise the device's claudeBridge preference decides.
@@ -982,6 +999,8 @@ export default function App() {
     if (kind === 'cli') openSessionTab(sessionId, title);
     else openSdkTab(sessionId, title);
   }
+  const LIVE_TITLE = 'The server still holds a process for this session — picking it attaches to that process instead of starting a new one';
+  const WIRE_TITLE = 'This session has wire-proxy records: open it and use ⋮ → Observe this session to see them';
   function liveBadge(live: 'cli' | 'sdk' | null | undefined): string | undefined {
     if (live === 'sdk') return '● live · SDK tab';
     if (live === 'cli') return '● live · classic tab';
@@ -1002,6 +1021,7 @@ export default function App() {
       secondary: s.uuid.slice(0, 8),
       timestamp: s.mtime,
       badge: liveBadge(s.live) ?? (s.wire ? `⚡ ${s.wire} wire` : undefined),
+      badgeTitle: s.live ? LIVE_TITLE : s.wire ? WIRE_TITLE : undefined,
     }));
     setPicker({
       title: 'Resume Claude session',
@@ -1028,6 +1048,7 @@ export default function App() {
       secondary: s.sessionId.slice(0, 8),
       timestamp: s.lastModified,
       badge: liveBadge(s.liveIn),
+      badgeTitle: s.liveIn ? LIVE_TITLE : undefined,
     }));
     setPicker({
       title: 'Resume Claude session',
@@ -1762,6 +1783,7 @@ export default function App() {
           onObserve={observeTab}
           onResumeSession={activeProject && localPrefs.enableClaude ? (localPrefs.claudeBridge === 'sdk' ? resumeSdkSessions : resumeCliSessions) : undefined}
           onRenameSdkSession={(tab) => void renameSdkTab(tab)}
+          onResetSession={(tab) => void resetSessionTab(tab)}
           onNewDevinSession={activeProject && localPrefs.enableDevin ? () => openDevinTab() : undefined}
           onResumeDevinSession={
             activeProject && localPrefs.enableDevin
@@ -1776,6 +1798,9 @@ export default function App() {
                     primary: s.title || s.sessionId,
                     secondary: s.sessionId,
                     timestamp: s.updatedAt ? new Date(s.updatedAt).getTime() : undefined,
+                    // Model: DevinPanel rule-099 / server.ListDevinSessions rule-477.
+                    badge: s.live ? '● live' : undefined,
+                    badgeTitle: s.live ? LIVE_TITLE : undefined,
                   }));
                   setPicker({
                     title: 'Resume Devin session',

@@ -158,6 +158,9 @@ export type ResumableDevinSession = {
   cwd?: string;
   title?: string;
   updatedAt?: string;
+  // The server currently holds a devin process for this slug
+  // (server.ListDevinSessions); picking it attaches instead of spawning.
+  live?: boolean;
 };
 
 export type SendKey = 'enter' | 'cmd-enter' | 'shift-enter';

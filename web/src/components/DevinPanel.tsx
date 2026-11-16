@@ -1271,7 +1271,7 @@ export function DevinPanel({
       // otherwise stack a redundant "Devin exited" line on top.
       if (loadFailedRef.current) return;
       sessionExitedRef.current = true;
-      append({ id: shortId(), role: 'system', text: `Devin exited (code ${msg.code ?? '?'})` });
+      append({ id: shortId(), role: 'system', text: msg.code === 'reset' ? 'Session was reset from another tab — ↻ Refresh tab to reconnect.' : `Devin exited (code ${msg.code ?? '?'})` });
       updateStatus('closed', 'devin process exited');
       return;
     }

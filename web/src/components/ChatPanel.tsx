@@ -918,7 +918,7 @@ export function ChatPanel({
     }
     if (m.type === 'exit') {
       sessionExitedRef.current = true;
-      append({ id: shortId(), role: 'system', text: `session exited (code=${m.code})` });
+      append({ id: shortId(), role: 'system', text: m.code === 'reset' ? 'Session was reset from another tab — ↻ Refresh tab to reconnect.' : `session exited (code=${m.code})` });
       setStatus('closed');
       // Nothing is waiting on the other end any more.
       forms.clear();
