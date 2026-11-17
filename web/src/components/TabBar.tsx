@@ -70,6 +70,7 @@ export function TabBar({
   onResumeSession,
   claudeBridge,
   onRenameSdkSession,
+  onRenameDevinSession,
   onNewDevinSession,
   onResumeDevinSession,
   onOpenTabKind,
@@ -106,6 +107,8 @@ export function TabBar({
   // Model: web.RenameSdkSession — only offered for the active claude-sdk tab
   // once it has a session id.
   onRenameSdkSession?: (tab: Tab) => void;
+  // Model: web.RenameDevinTab — same shape for the active devin tab.
+  onRenameDevinSession?: (tab: Tab) => void;
   onNewDevinSession?: () => void;
   onResumeDevinSession?: () => void;
   onOpenTabKind?: (kindId: string) => void;
@@ -290,13 +293,21 @@ export function TabBar({
                 onClick={() => { setOpen(false); onRenameSdkSession(activeForMenu); }}
               >✎ Rename session</button>
             )}
+            {onRenameDevinSession && activeForMenu?.type === 'devin' && (
+              <button
+                className="overflow-action"
+                disabled={!activeForMenu.resumeId}
+                title={activeForMenu.resumeId ? 'Give this session a persistent name (shown in the resume list too)' : 'The session has not started yet'}
+                onClick={() => { setOpen(false); onRenameDevinSession(activeForMenu); }}
+              >✎ Rename session</button>
+            )}
             {onMoveTab && activeTabId && (moveTargets ?? []).length > 0 && (
               <button
                 className="overflow-action overflow-submenu"
                 onClick={() => setSubmenu('move')}
               >→ Move tab to …<span className="overflow-chevron">›</span></button>
             )}
-            {activeTabId && ((onRefresh || onResetSession || onExport || observable || (onRenameSdkSession && activeForMenu?.type === 'claude-sdk')) || (onMoveTab && (moveTargets ?? []).length > 0)) && (
+            {activeTabId && ((onRefresh || onResetSession || onExport || observable || (onRenameSdkSession && activeForMenu?.type === 'claude-sdk') || (onRenameDevinSession && activeForMenu?.type === 'devin')) || (onMoveTab && (moveTargets ?? []).length > 0)) && (
               <div className="overflow-divider" />
             )}
             {onNewSession && (

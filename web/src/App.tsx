@@ -30,6 +30,7 @@ import {
   listDevinSessions,
   listSdkSessions,
   renameSdkSession,
+  renameDevinSession,
   resetSession,
   getSettings,
   putSettings,
@@ -975,6 +976,25 @@ export default function App() {
     }
   }
 
+  // Model: web.RenameDevinTab (rule-479) — parallel to renameSdkTab. The
+  // server forwards ACP session/rename to the live devin process; Devin
+  // persists it and the resume list follows. Tab title set right away.
+  async function renameDevinTab(tab: Tab) {
+    if (tab.type !== 'devin' || !tab.resumeId || !activeProjectId) return;
+    const next = window.prompt('Session name', tab.title ?? '');
+    if (next == null) return;
+    const title = next.trim();
+    if (!title) return;
+    try {
+      await renameDevinSession(activeProjectId, tab.resumeId, title);
+      const pid = activeProjectId;
+      const live = workspaceRef.current.projects[pid]?.tabs ?? [];
+      updateProjectTabs(pid, live.map((x) => (x.id === tab.id ? { ...x, title } : x)));
+    } catch (e: any) {
+      alert(`Rename failed: ${e?.message ?? e}`);
+    }
+  }
+
   // Model: web.ResetSessionTab (rule-462~464). Ask the server to kill the
   // session's process and forget it, then remount the panel: its mount path
   // refetches the transcript and reconnects with resume=, which spawns a
@@ -1783,6 +1803,7 @@ export default function App() {
           onObserve={observeTab}
           onResumeSession={activeProject && localPrefs.enableClaude ? (localPrefs.claudeBridge === 'sdk' ? resumeSdkSessions : resumeCliSessions) : undefined}
           onRenameSdkSession={(tab) => void renameSdkTab(tab)}
+          onRenameDevinSession={(tab) => void renameDevinTab(tab)}
           onResetSession={(tab) => void resetSessionTab(tab)}
           onNewDevinSession={activeProject && localPrefs.enableDevin ? () => openDevinTab() : undefined}
           onResumeDevinSession={

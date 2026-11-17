@@ -63,6 +63,9 @@ type DevinSessionEntry = {
   // The one `_cognition.ai/revert/execute` RPC we're waiting on (rule-364),
   // with the edited prompt to write once the agent confirms.
   pendingRevert: { id: number; stepId: string; text: string; images: WireImage[] } | null;
+  // Model: server.RenameDevinSession (rule-478). session/rename RPCs sent on
+  // behalf of a REST caller, awaiting the agent's response, keyed by rpc id.
+  pendingRenames: Map<number, { resolve: (msg: any) => void; timer: NodeJS.Timeout }>;
   killTimer?: NodeJS.Timeout;
 };
 
@@ -282,6 +285,28 @@ function readMainChainId(sessionId: string): number | null {
   } finally {
     try { db.close(); } catch {}
   }
+}
+
+// Model: server.RenameDevinSession (rule-478). Forward ACP session/rename to
+// the live process and resolve with the agent's JSON-RPC response — or a
+// synthetic error on timeout / process exit. Devin persists the title in its
+// own sessions.db (we never write it) and pushes session_info_update{title}.
+const RENAME_TIMEOUT_MS = 10_000;
+function renameLiveSession(entry: DevinSessionEntry, title: string): Promise<any> {
+  return new Promise((resolve) => {
+    const id = nextRpcId(entry);
+    const timer = setTimeout(() => {
+      entry.pendingRenames.delete(id);
+      resolve({ error: { code: 'timeout', message: 'devin did not answer session/rename in time' } });
+    }, RENAME_TIMEOUT_MS);
+    entry.pendingRenames.set(id, { resolve, timer });
+    writeRpc(entry, {
+      jsonrpc: '2.0',
+      id,
+      method: 'session/rename',
+      params: { sessionId: entry.sessionId, title },
+    });
+  });
 }
 
 // revert/execute came back (rule-364). On success: write the edited prompt,
@@ -678,6 +703,17 @@ function wireProcess(entry: DevinSessionEntry, onInit: (sessionIdNow: string | n
       return;
     }
 
+    // session/rename response awaited by the REST route (rule-478). Still
+    // broadcast so clients see the full RPC trace.
+    if (typeof msg?.id === 'number' && entry.pendingRenames.has(msg.id)) {
+      const pr = entry.pendingRenames.get(msg.id)!;
+      entry.pendingRenames.delete(msg.id);
+      clearTimeout(pr.timer);
+      pr.resolve(msg);
+      broadcast(entry, { type: 'acp', data: msg });
+      return;
+    }
+
     // Notification or other response — pass straight through.
     broadcast(entry, { type: 'acp', data: msg });
   });
@@ -688,6 +724,11 @@ function wireProcess(entry: DevinSessionEntry, onInit: (sessionIdNow: string | n
 
   entry.proc.on('exit', (code) => {
     persistSessionConfig(entry);
+    for (const pr of entry.pendingRenames.values()) {
+      clearTimeout(pr.timer);
+      pr.resolve({ error: { message: 'devin process exited' } });
+    }
+    entry.pendingRenames.clear();
     broadcast(entry, { type: 'exit', code: entry.resetting ? 'reset' : code });
     // rule-471: only drop the registration if it is still ours — a reset
     // client may already have respawned this slug into a new entry.
@@ -1154,6 +1195,33 @@ export function registerDevinRoutes(app: FastifyInstance) {
     },
   );
 
+  // Model: server.RenameDevinSession (rule-478) — only possible through a live
+  // process: Devin owns sessions.db, so the rename goes over ACP and Devin
+  // itself persists it + stops auto-titling the session. The resume list
+  // (ListDevinSessions, DB read) and the tab (session_info_update) follow.
+  app.post<{ Params: { id: string; slug: string }; Body: { title?: string } }>(
+    '/api/projects/:id/devin-sessions/:slug/rename',
+    async (req, reply) => {
+      const uid = getUserId(req);
+      if (!uid) return reply.code(401).send({ error: 'unauthorized' });
+      const project = await getProject(uid, req.params.id);
+      if (!project) return reply.code(404).send({ error: 'project not found' });
+      const title = String(req.body?.title ?? '').trim();
+      if (!title) return reply.code(400).send({ error: 'title required' });
+      const entry = bySessionId.get(req.params.slug);
+      if (!entry || !entry.initialized) {
+        return reply.code(409).send({ error: 'session not live — open its tab first, then rename' });
+      }
+      const res = await renameLiveSession(entry, title);
+      if (res?.error) {
+        const msg = res.error?.message ?? JSON.stringify(res.error);
+        return reply.code(res.error?.code === 'timeout' ? 504 : 502).send({ error: `rename failed: ${msg}` });
+      }
+      app.log.info({ slug: req.params.slug, title }, 'devin: renamed');
+      return { ok: true, title };
+    },
+  );
+
   app.get<{ Params: { id: string; slug: string }; Querystring: { limit?: string; before?: string } }>(
     '/api/projects/:id/devin-sessions/:slug/transcript',
     async (req, reply) => {
@@ -1237,6 +1305,7 @@ export function registerDevinRoutes(app: FastifyInstance) {
         pendingAgentRpcs: new Map(),
         revertSteps: null,
         pendingRevert: null,
+        pendingRenames: new Map(),
       };
       // Pre-register so a near-simultaneous second ws with the same resumeId
       // attaches instead of spawning a duplicate.

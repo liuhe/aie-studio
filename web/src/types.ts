@@ -29,6 +29,8 @@ export type EditorTab = { id: string; type: 'editor'; path: string; groupId?: st
 // every API request/response under <project>/.aie/observations/wire/. Sticks
 // to the tab, so a resume keeps capturing.
 export type SessionTab = { id: string; type: 'session'; resumeId?: string; title?: string; initialPrompt?: string; wire?: boolean; groupId?: string };
+// title = Devin's own session title (sessions.db); RenameDevinTab changes it
+// through ACP session/rename, so the resume list shows the same name.
 export type DevinTab = { id: string; type: 'devin'; resumeId?: string; title?: string; groupId?: string };
 // Model: entity Tab (type=claude-sdk) / web.SdkChatPanel. A Claude session
 // driven through the Agent SDK bridge (server ClaudeSdkSessionBridge) instead

@@ -304,6 +304,20 @@ export async function getDevinSession(
   return r.json();
 }
 
+// Model: web.RenameDevinTab → server.RenameDevinSession. Only works while the
+// session is live (its tab is open); the server answers 409 otherwise.
+export async function renameDevinSession(projectId: string, slug: string, title: string): Promise<void> {
+  const r = await fetch(`/api/projects/${projectId}/devin-sessions/${encodeURIComponent(slug)}/rename`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body?.error ?? `HTTP ${r.status}`);
+  }
+}
+
 export type AieSkill = { name: string; description: string; source: string };
 export type AieAgent = { name: string; description: string; tools: string; source: string };
 export type AieProjectMeta = {
